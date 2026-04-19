@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from claude_switch import cli
-from claude_switch.manager import ProfileManager
+from claude_select import cli
+from claude_select.manager import ProfileManager
 
 
 def test_cli_capture_and_list(monkeypatch, capsys, store, fake_live_backend):
