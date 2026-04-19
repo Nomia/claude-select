@@ -22,22 +22,6 @@
 - 你写了基于 Claude Agent SDK 的 Python 工具，希望显式指定“这次调用用哪个账号”
 - 你不想让 Python 代码依赖当前全局 CLI 登录账号
 
-## 核心设计 🧠
-
-项目把状态拆成三层：
-
-1. `profiles`
-   所有共享的认证档案，CLI 和 Python 共用
-2. `current_cli_profile`
-   当前写入 Claude live state 的全局 CLI profile
-3. `default_sdk_profile`
-   Python 调用方未显式指定 profile 时使用的默认值
-
-这意味着：
-
-- CLI 切换是全局行为
-- Python Agent SDK 切换是“单次调用级别”的行为
-
 ## 安装 📦
 
 ```bash
@@ -206,6 +190,22 @@ Claude 自己的 live state 仍然在它原本的位置，例如：
 - 这是一个面向本地单用户机器的工具
 - 完整的 Claude 运行进程检测还没有实现
 - 更广泛的系统 keyring 支持还可以继续增强
+
+## 核心设计 🧠
+
+项目把状态拆成三层：
+
+1. `profiles`
+   所有共享的认证档案，CLI 和 Python 共用
+2. `current_cli_profile`
+   当前写入 Claude live state 的全局 CLI profile
+3. `default_sdk_profile`
+   Python 调用方未显式指定 profile 时使用的默认值
+
+这意味着：
+
+- CLI 切换是全局行为
+- Python Agent SDK 切换是“单次调用级别”的行为
 
 ## 开发与质量 🛠️
 
