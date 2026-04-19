@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from claude_switch.models import SecretPayload
-from claude_switch.oauth import classify_auth_state, refresh_secret_payload
+from claude_select.models import SecretPayload
+from claude_select.oauth import classify_auth_state, refresh_secret_payload
 
 
 def test_classify_auth_state_refreshable():
