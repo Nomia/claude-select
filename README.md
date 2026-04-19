@@ -34,7 +34,21 @@ Current implementation status:
 
 Recommended first-run flow:
 
-1. Log in with Claude's official CLI flow.
+1. Install `claude-select`.
+
+```bash
+pip install claude-select
+```
+
+Or install from source:
+
+```bash
+git clone https://github.com/Nomia/claude-select.git
+cd claude-select
+python3 -m pip install -e ".[dev]"
+```
+
+2. Log in with Claude's official CLI flow.
 
 ```bash
 claude
@@ -42,25 +56,25 @@ claude
 
 Then complete `/login`.
 
-2. Capture the current account into a named profile.
+3. Capture the current account into a named profile.
 
 ```bash
 claude-select capture work
 ```
 
-3. Log in with another account if needed, then capture again.
+4. Log in with another account if needed, then capture again.
 
 ```bash
 claude-select capture personal
 ```
 
-4. Switch the global CLI account when needed.
+5. Switch the global CLI account when needed.
 
 ```bash
 claude-select use personal
 ```
 
-5. Use a chosen profile from Python.
+6. Use a chosen profile from Python.
 
 ```python
 from claude_select import ProfileManager
