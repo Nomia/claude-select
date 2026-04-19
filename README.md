@@ -2,6 +2,10 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
+[![PyPI version](https://img.shields.io/pypi/v/claude-select.svg)](https://pypi.org/project/claude-select/)
+[![Python versions](https://img.shields.io/pypi/pyversions/claude-select.svg)](https://pypi.org/project/claude-select/)
+[![CI](https://img.shields.io/github/actions/workflow/status/Nomia/claude-select/ci.yml?branch=main)](https://github.com/Nomia/claude-select/actions/workflows/ci.yml)
+
 `claude-select` is a local SDK and CLI design for managing multiple Claude authentication profiles across:
 
 - the global Claude Code CLI login state
@@ -26,6 +30,47 @@ Current implementation status:
 - unit tests are in place
 - lint, type-check, build, and CI configuration are included
 
+## How Users Get Started ✨
+
+Recommended first-run flow:
+
+1. Log in with Claude's official CLI flow.
+
+```bash
+claude
+```
+
+Then complete `/login`.
+
+2. Capture the current account into a named profile.
+
+```bash
+claude-select capture work
+```
+
+3. Log in with another account if needed, then capture again.
+
+```bash
+claude-select capture personal
+```
+
+4. Switch the global CLI account when needed.
+
+```bash
+claude-select use personal
+```
+
+5. Use a chosen profile from Python.
+
+```python
+from claude_select import ProfileManager
+from claude_code_sdk import ClaudeAgentOptions
+
+manager = ProfileManager()
+env = manager.build_sdk_env("work")
+options = ClaudeAgentOptions(env=env)
+```
+
 ## Goals 🎯
 
 - Let a user capture multiple Claude accounts/profiles on one machine.
@@ -33,13 +78,6 @@ Current implementation status:
 - Let Python programs select a profile explicitly for each Claude Agent SDK call.
 - Share one profile store between CLI switching and Python SDK usage.
 - Avoid coupling Python SDK requests to the current global CLI account.
-
-## Non-goals
-
-- Replacing Claude's official login flow.
-- Building a hosted multi-user auth product.
-- Relying on global process-wide environment mutation for Python SDK calls.
-- Treating Agent SDK auth and CLI live auth as the same runtime state.
 
 ## Core Model
 
@@ -291,47 +329,6 @@ Conflicting auth env vars should be removed from the returned environment. For e
 - `CLAUDE_CODE_USE_BEDROCK`
 - `CLAUDE_CODE_USE_VERTEX`
 - `CLAUDE_CODE_USE_FOUNDRY`
-
-## How Users Get Started ✨
-
-Recommended first-run flow:
-
-1. Log in with Claude's official CLI flow.
-
-```bash
-claude
-```
-
-Then complete `/login`.
-
-2. Capture the current account into a named profile.
-
-```bash
-claude-select capture work
-```
-
-3. Log in with another account if needed, then capture again.
-
-```bash
-claude-select capture personal
-```
-
-4. Switch the global CLI account when needed.
-
-```bash
-claude-select use personal
-```
-
-5. Use a chosen profile from Python.
-
-```python
-from claude_select import ProfileManager
-from claude_code_sdk import ClaudeAgentOptions
-
-manager = ProfileManager()
-env = manager.build_sdk_env("work")
-options = ClaudeAgentOptions(env=env)
-```
 
 ## Development 🛠️
 
