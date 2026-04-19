@@ -4,9 +4,9 @@ import copy
 
 import pytest
 
-from claude_switch.live_state import ClaudeLiveStateBackend
-from claude_switch.models import LiveState
-from claude_switch.store import FileProfileStore
+from claude_select.live_state import ClaudeLiveStateBackend
+from claude_select.models import LiveState
+from claude_select.store import FileProfileStore
 
 
 @pytest.fixture
