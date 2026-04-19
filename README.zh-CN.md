@@ -54,7 +54,15 @@ python3 -m pip install -e ".[dev]"
 
 ## 快速开始 ⚡
 
-### 1. 先用 Claude 官方方式登录
+### 1. 先安装 `claude-select`
+
+```bash
+pip install claude-select
+```
+
+如果你已经安装过，可以直接跳到下一步。
+
+### 2. 先用 Claude 官方方式登录
 
 ```bash
 claude
@@ -62,7 +70,7 @@ claude
 
 然后在 Claude 中执行 `/login`。
 
-### 2. 把当前账号保存成 profile
+### 3. 把当前账号保存成 profile
 
 ```bash
 claude-select capture work
@@ -74,7 +82,7 @@ claude-select capture work
 claude-select capture personal
 ```
 
-### 3. 切换全局 CLI 账号
+### 4. 切换全局 CLI 账号
 
 ```bash
 claude-select use work
@@ -83,7 +91,7 @@ claude-select list
 claude-select current
 ```
 
-### 4. 在 Python Agent SDK 中使用某个 profile
+### 5. 在 Python Agent SDK 中使用某个 profile
 
 ```python
 from claude_select import ProfileManager
