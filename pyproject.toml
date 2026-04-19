@@ -1,0 +1,91 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-switch"
+version = "0.1.0"
+description = "Manage multiple Claude auth profiles for the Claude Code CLI and Python Agent SDK usage."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+  { name = "wx.luo" }
+]
+keywords = ["claude", "claude-code", "oauth", "sdk", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Utilities",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/wx-luo/claude-switch"
+Repository = "https://github.com/wx-luo/claude-switch"
+Issues = "https://github.com/wx-luo/claude-switch/issues"
+Changelog = "https://github.com/wx-luo/claude-switch/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.2",
+  "mypy>=1.11.0",
+  "pytest>=8.3.0",
+  "pytest-cov>=5.0.0",
+  "ruff>=0.11.0",
+  "twine>=5.1.1",
+]
+
+[project.scripts]
+claude-switch = "claude_switch.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --cov=claude_switch --cov-report=term-missing"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "B",
+  "UP",
+  "SIM",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+strict_optional = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_any_generics = true
+show_error_codes = true
+
+[tool.coverage.report]
+fail_under = 90
+skip_empty = true
