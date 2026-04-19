@@ -4,13 +4,13 @@ import json
 
 import pytest
 
-from claude_switch.exceptions import ConfigError
-from claude_switch.live_state import (
+from claude_select.exceptions import ConfigError
+from claude_select.live_state import (
     ClaudeLiveStateBackend,
     FileCredentialStore,
     MacOSKeychainCredentialStore,
 )
-from claude_switch.models import LiveState
+from claude_select.models import LiveState
 
 
 def test_file_credential_store_round_trip(tmp_path):
@@ -87,7 +87,7 @@ def test_macos_keychain_store(monkeypatch, tmp_path):
             return Result()
         return Result()
 
-    monkeypatch.setattr("claude_switch.live_state.subprocess.run", fake_run)
+    monkeypatch.setattr("claude_select.live_state.subprocess.run", fake_run)
 
     store = MacOSKeychainCredentialStore(account_name="tester")
     loaded = store.read()
