@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claude-switch"
+name = "claude-select"
 version = "0.1.0"
 description = "Manage multiple Claude auth profiles for the Claude Code CLI and Python Agent SDK usage."
 readme = "README.md"
@@ -27,10 +27,10 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/wx-luo/claude-switch"
-Repository = "https://github.com/wx-luo/claude-switch"
-Issues = "https://github.com/wx-luo/claude-switch/issues"
-Changelog = "https://github.com/wx-luo/claude-switch/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Nomia/claude-select"
+Repository = "https://github.com/Nomia/claude-select"
+Issues = "https://github.com/Nomia/claude-select/issues"
+Changelog = "https://github.com/Nomia/claude-select/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-claude-switch = "claude_switch.cli:main"
+claude-select = "claude_select.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -53,7 +53,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --cov=claude_switch --cov-report=term-missing"
+addopts = "-q --cov=claude_select --cov-report=term-missing"
 
 [tool.ruff]
 target-version = "py312"
