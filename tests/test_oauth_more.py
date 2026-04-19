@@ -6,9 +6,9 @@ import urllib.error
 
 import pytest
 
-from claude_switch.exceptions import OAuthRefreshError
-from claude_switch.models import ProfileMetadata, SecretPayload
-from claude_switch.oauth import (
+from claude_select.exceptions import OAuthRefreshError
+from claude_select.models import ProfileMetadata, SecretPayload
+from claude_select.oauth import (
     mark_refresh_failure,
     mark_refresh_success,
     request_oauth_refresh,
@@ -57,7 +57,7 @@ def test_request_oauth_refresh_success(monkeypatch):
             return json.dumps({"access_token": "new", "expires_in": 3600}).encode("utf-8")
 
     monkeypatch.setattr(
-        "claude_switch.oauth.urllib.request.urlopen",
+        "claude_select.oauth.urllib.request.urlopen",
         lambda *_args, **_kwargs: FakeResponse(),
     )
 
@@ -76,7 +76,7 @@ def test_request_oauth_refresh_http_error(monkeypatch):
             fp=io.BytesIO(b'{"error":"invalid"}'),
         )
 
-    monkeypatch.setattr("claude_switch.oauth.urllib.request.urlopen", raise_http_error)
+    monkeypatch.setattr("claude_select.oauth.urllib.request.urlopen", raise_http_error)
 
     with pytest.raises(OAuthRefreshError):
         request_oauth_refresh("refresh")
