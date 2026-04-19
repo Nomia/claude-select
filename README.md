@@ -85,6 +85,139 @@ env = manager.build_sdk_env("work")
 options = ClaudeAgentOptions(env=env)
 ```
 
+## CLI Design 🖥️
+
+Planned commands:
+
+```bash
+claude-select capture <profile>
+claude-select sync [<profile>]
+claude-select list
+claude-select current
+claude-select use <profile>
+claude-select remove <profile>
+claude-select set-default-sdk <profile>
+```
+
+### Command behavior
+
+- `capture <profile>`
+  Reads Claude's current live login state and stores it as a named profile.
+- `sync [<profile>]`
+  Updates an existing stored profile from the current live login state.
+- `list`
+  Shows all stored profiles and auth state.
+- `current`
+  Shows the current CLI profile and default SDK profile.
+- `use <profile>`
+  Switches Claude's global live login state to the chosen profile.
+- `remove <profile>`
+  Removes a stored profile from the SDK store.
+- `set-default-sdk <profile>`
+  Updates `default_sdk_profile`.
+
+## Python SDK Design 🐍
+
+Planned primary interface:
+
+```python
+from claude_select import ProfileManager
+
+manager = ProfileManager()
+env = manager.build_sdk_env("work")
+```
+
+Planned convenience function:
+
+```python
+from claude_select import build_sdk_env
+
+env = build_sdk_env("work")
+```
+
+### Intended `ProfileManager` surface
+
+```python
+class ProfileManager:
+    def list_profiles(self) -> list[str]: ...
+    def capture_cli_profile(self, name: str) -> None: ...
+    def sync_cli_profile(self, name: str | None = None) -> None: ...
+    def switch_cli(self, name: str) -> None: ...
+    def set_default_sdk_profile(self, name: str) -> None: ...
+    def get_default_sdk_profile(self) -> str | None: ...
+    def inspect_profile(self, name: str) -> dict: ...
+    def build_sdk_env(self, name: str | None = None) -> dict[str, str]: ...
+```
+
+## Agent SDK Environment Injection
+
+The direct usage style for Python is the intended default:
+
+```python
+from claude_select import ProfileManager
+from claude_code_sdk import ClaudeAgentOptions, query
+
+manager = ProfileManager()
+
+env = manager.build_sdk_env("work")
+options = ClaudeAgentOptions(env=env)
+
+async for message in query(
+    prompt="Analyze this repository",
+    options=options,
+):
+    print(message)
+```
+
+### Why this is the default
+
+- explicit per-call behavior
+- works with async and concurrent tasks
+- no hidden global mutation
+- lets one process use multiple profiles safely
+
+## Environment Variables by Profile Type
+
+`build_sdk_env()` will return a clean environment map for exactly one auth mode.
+
+### OAuth profile
+
+Expected output:
+
+```python
+{
+    "CLAUDE_CODE_OAUTH_TOKEN": "...",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN": "..."
+}
+```
+
+### API key profile
+
+Expected output:
+
+```python
+{
+    "ANTHROPIC_API_KEY": "..."
+}
+```
+
+### Important rule
+
+Conflicting auth env vars should be removed from the returned environment. For example, an OAuth profile should not leave these active:
+
+- `ANTHROPIC_API_KEY`
+- `ANTHROPIC_AUTH_TOKEN`
+- `CLAUDE_CODE_USE_BEDROCK`
+- `CLAUDE_CODE_USE_VERTEX`
+- `CLAUDE_CODE_USE_FOUNDRY`
+
+## Current Limitations ⚠️
+
+- The primary supported profile type today is OAuth captured from Claude CLI live state.
+- macOS keychain reading and writing is implemented, but broader secure-store coverage is still incomplete.
+- Full pre-switch detection of running Claude sessions and IDE integrations is not implemented yet.
+- This project is designed for local single-user machines, not shared multi-user hosts.
+
 ## Goals 🎯
 
 - Let a user capture multiple Claude accounts/profiles on one machine.
@@ -218,132 +351,6 @@ For Python SDK usage:
 - `build_sdk_env(profile)` should attempt refresh first
 - if refresh fails, raise a clear exception such as `ProfileReauthRequired`
 
-## CLI Design 🖥️
-
-Planned commands:
-
-```bash
-claude-select capture <profile>
-claude-select sync [<profile>]
-claude-select list
-claude-select current
-claude-select use <profile>
-claude-select remove <profile>
-claude-select set-default-sdk <profile>
-```
-
-### Command behavior
-
-- `capture <profile>`
-  Reads Claude's current live login state and stores it as a named profile.
-- `sync [<profile>]`
-  Updates an existing stored profile from the current live login state.
-- `list`
-  Shows all stored profiles and auth state.
-- `current`
-  Shows the current CLI profile and default SDK profile.
-- `use <profile>`
-  Switches Claude's global live login state to the chosen profile.
-- `remove <profile>`
-  Removes a stored profile from the SDK store.
-- `set-default-sdk <profile>`
-  Updates `default_sdk_profile`.
-
-## Python SDK Design 🐍
-
-Planned primary interface:
-
-```python
-from claude_select import ProfileManager
-
-manager = ProfileManager()
-env = manager.build_sdk_env("work")
-```
-
-Planned convenience function:
-
-```python
-from claude_select import build_sdk_env
-
-env = build_sdk_env("work")
-```
-
-### Intended `ProfileManager` surface
-
-```python
-class ProfileManager:
-    def list_profiles(self) -> list[str]: ...
-    def capture_cli_profile(self, name: str) -> None: ...
-    def sync_cli_profile(self, name: str | None = None) -> None: ...
-    def switch_cli(self, name: str) -> None: ...
-    def set_default_sdk_profile(self, name: str) -> None: ...
-    def get_default_sdk_profile(self) -> str | None: ...
-    def inspect_profile(self, name: str) -> dict: ...
-    def build_sdk_env(self, name: str | None = None) -> dict[str, str]: ...
-```
-
-## Agent SDK Environment Injection
-
-The direct usage style for Python is the intended default:
-
-```python
-from claude_select import ProfileManager
-from claude_code_sdk import ClaudeAgentOptions, query
-
-manager = ProfileManager()
-
-env = manager.build_sdk_env("work")
-options = ClaudeAgentOptions(env=env)
-
-async for message in query(
-    prompt="Analyze this repository",
-    options=options,
-):
-    print(message)
-```
-
-### Why this is the default
-
-- explicit per-call behavior
-- works with async and concurrent tasks
-- no hidden global mutation
-- lets one process use multiple profiles safely
-
-## Environment Variables by Profile Type
-
-`build_sdk_env()` will return a clean environment map for exactly one auth mode.
-
-### OAuth profile
-
-Expected output:
-
-```python
-{
-    "CLAUDE_CODE_OAUTH_TOKEN": "...",
-    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN": "..."
-}
-```
-
-### API key profile
-
-Expected output:
-
-```python
-{
-    "ANTHROPIC_API_KEY": "..."
-}
-```
-
-### Important rule
-
-Conflicting auth env vars should be removed from the returned environment. For example, an OAuth profile should not leave these active:
-
-- `ANTHROPIC_API_KEY`
-- `ANTHROPIC_AUTH_TOKEN`
-- `CLAUDE_CODE_USE_BEDROCK`
-- `CLAUDE_CODE_USE_VERTEX`
-- `CLAUDE_CODE_USE_FOUNDRY`
-
 ## Development 🛠️
 
 Set up a local environment:
@@ -426,13 +433,6 @@ The first implementation should not prioritize:
 - multi-user remote storage
 - GUI
 - deep plugin integrations
-
-## Current Limitations ⚠️
-
-- The primary supported profile type today is OAuth captured from Claude CLI live state.
-- macOS keychain reading and writing is implemented, but broader secure-store coverage is still incomplete.
-- Full pre-switch detection of running Claude sessions and IDE integrations is not implemented yet.
-- This project is designed for local single-user machines, not shared multi-user hosts.
 
 ## Release Checklist 📦
 
