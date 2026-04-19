@@ -1,8 +1,8 @@
-"""Module entry point for `python -m claude_switch`."""
+"""Module entry point for `python -m claude_select`."""
 
 from __future__ import annotations
 
-from claude_switch.cli import main
+from claude_select.cli import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

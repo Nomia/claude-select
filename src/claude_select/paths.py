@@ -1,4 +1,4 @@
-"""Path helpers for claude-switch and Claude live config discovery."""
+"""Path helpers for claude-select and Claude live config discovery."""
 
 from __future__ import annotations
 
@@ -37,9 +37,9 @@ def get_credentials_path(env: Mapping[str, str] | None = None) -> Path:
 
 
 def get_default_store_root(env: Mapping[str, str] | None = None) -> Path:
-    """Return the claude-switch storage root."""
+    """Return the claude-select storage root."""
     resolved_env = env if env is not None else os.environ
     xdg_config_home = resolved_env.get("XDG_CONFIG_HOME")
     if xdg_config_home:
-        return Path(xdg_config_home).expanduser() / "claude-switch"
-    return Path.home() / ".config" / "claude-switch"
+        return Path(xdg_config_home).expanduser() / "claude-select"
+    return Path.home() / ".config" / "claude-select"

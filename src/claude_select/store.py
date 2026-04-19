@@ -8,9 +8,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from claude_switch.locking import FileLock
-from claude_switch.models import ProfileMetadata, SecretPayload, StateFile
-from claude_switch.paths import get_default_store_root
+from claude_select.locking import FileLock
+from claude_select.models import ProfileMetadata, SecretPayload, StateFile
+from claude_select.paths import get_default_store_root
 
 
 class FileProfileStore:

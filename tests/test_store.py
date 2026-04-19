@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from claude_switch.models import ProfileMetadata, SecretPayload
+from claude_select.models import ProfileMetadata, SecretPayload
 
 
 def test_upsert_and_load_profile(store):

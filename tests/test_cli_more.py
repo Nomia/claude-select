@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from claude_switch import cli
-from claude_switch.manager import ProfileManager
+from claude_select import cli
+from claude_select.manager import ProfileManager
 
 
 def test_cli_current_set_default_inspect_remove(monkeypatch, capsys, store, fake_live_backend):

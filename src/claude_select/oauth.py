@@ -9,8 +9,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from claude_switch.exceptions import OAuthRefreshError
-from claude_switch.models import (
+from claude_select.exceptions import OAuthRefreshError
+from claude_select.models import (
     AUTH_STATE_EXPIRING_SOON,
     AUTH_STATE_INVALID,
     AUTH_STATE_OK,
@@ -95,7 +95,7 @@ def request_oauth_refresh(refresh_token: str) -> dict[str, Any]:
         method="POST",
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "claude-switch/0.1.0",
+            "User-Agent": "claude-select/0.1.0",
         },
     )
     try:

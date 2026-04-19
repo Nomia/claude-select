@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import IO
 
-from claude_switch.exceptions import LockTimeoutError
+from claude_select.exceptions import LockTimeoutError
 
 if sys.platform == "win32":
     import msvcrt

@@ -1,4 +1,4 @@
-"""Command line interface for claude-switch."""
+"""Command line interface for claude-select."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import argparse
 import json
 import sys
 
-from claude_switch.exceptions import ClaudeSwitchError
-from claude_switch.manager import ProfileManager
+from claude_select.exceptions import ClaudeSwitchError
+from claude_select.manager import ProfileManager
 
 
 def build_parser() -> argparse.ArgumentParser:

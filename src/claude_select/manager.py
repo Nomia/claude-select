@@ -8,14 +8,14 @@ import re
 from dataclasses import asdict
 from typing import Any
 
-from claude_switch.exceptions import (
+from claude_select.exceptions import (
     ConfigError,
     ProfileNotFoundError,
     ProfileReauthRequired,
     ProfileValidationError,
 )
-from claude_switch.live_state import ClaudeLiveStateBackend
-from claude_switch.models import (
+from claude_select.live_state import ClaudeLiveStateBackend
+from claude_select.models import (
     AUTH_STATE_REFRESHABLE,
     PROFILE_KIND_OAUTH,
     LiveState,
@@ -23,14 +23,14 @@ from claude_switch.models import (
     SecretPayload,
     utc_now_iso,
 )
-from claude_switch.oauth import (
+from claude_select.oauth import (
     classify_auth_state,
     mark_refresh_failure,
     mark_refresh_success,
     refresh_secret_payload,
     update_profile_auth_metadata,
 )
-from claude_switch.store import FileProfileStore
+from claude_select.store import FileProfileStore
 
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 CONFLICTING_AUTH_ENV_VARS = {

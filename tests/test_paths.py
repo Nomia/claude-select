@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from claude_switch.paths import (
+from claude_select.paths import (
     get_claude_config_home,
     get_credentials_path,
     get_default_store_root,
@@ -19,7 +19,7 @@ def test_paths_respect_env_overrides(tmp_path):
     assert get_claude_config_home(env) == tmp_path / "claude-home"
     assert get_credentials_path(env) == tmp_path / "claude-home" / ".credentials.json"
     assert get_global_config_path(env) == tmp_path / "claude-home" / ".claude.json"
-    assert get_default_store_root(env) == tmp_path / "xdg" / "claude-switch"
+    assert get_default_store_root(env) == tmp_path / "xdg" / "claude-select"
 
 
 def test_global_config_prefers_legacy_file(tmp_path):

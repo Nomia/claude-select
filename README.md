@@ -1,6 +1,6 @@
-# claude-switch
+# claude-select
 
-`claude-switch` is a local SDK and CLI design for managing multiple Claude authentication profiles across:
+`claude-select` is a local SDK and CLI design for managing multiple Claude authentication profiles across:
 
 - the global Claude Code CLI login state
 - Python programs using the Claude Agent SDK
@@ -90,7 +90,7 @@ The SDK owns a profile store separate from Claude's live runtime files.
 Recommended structure:
 
 ```text
-~/.config/claude-switch/
+~/.config/claude-select/
   state.json
   secrets/
     work.json
@@ -169,13 +169,13 @@ For Python SDK usage:
 Planned commands:
 
 ```bash
-claude-switch capture <profile>
-claude-switch sync [<profile>]
-claude-switch list
-claude-switch current
-claude-switch use <profile>
-claude-switch remove <profile>
-claude-switch set-default-sdk <profile>
+claude-select capture <profile>
+claude-select sync [<profile>]
+claude-select list
+claude-select current
+claude-select use <profile>
+claude-select remove <profile>
+claude-select set-default-sdk <profile>
 ```
 
 ### Command behavior
@@ -200,7 +200,7 @@ claude-switch set-default-sdk <profile>
 Planned primary interface:
 
 ```python
-from claude_switch import ProfileManager
+from claude_select import ProfileManager
 
 manager = ProfileManager()
 env = manager.build_sdk_env("work")
@@ -209,7 +209,7 @@ env = manager.build_sdk_env("work")
 Planned convenience function:
 
 ```python
-from claude_switch import build_sdk_env
+from claude_select import build_sdk_env
 
 env = build_sdk_env("work")
 ```
@@ -233,7 +233,7 @@ class ProfileManager:
 The direct usage style for Python is the intended default:
 
 ```python
-from claude_switch import ProfileManager
+from claude_select import ProfileManager
 from claude_code_sdk import ClaudeAgentOptions, query
 
 manager = ProfileManager()
@@ -305,25 +305,25 @@ Then complete `/login`.
 2. Capture the current account into a named profile.
 
 ```bash
-claude-switch capture work
+claude-select capture work
 ```
 
 3. Log in with another account if needed, then capture again.
 
 ```bash
-claude-switch capture personal
+claude-select capture personal
 ```
 
 4. Switch the global CLI account when needed.
 
 ```bash
-claude-switch use personal
+claude-select use personal
 ```
 
 5. Use a chosen profile from Python.
 
 ```python
-from claude_switch import ProfileManager
+from claude_select import ProfileManager
 from claude_code_sdk import ClaudeAgentOptions
 
 manager = ProfileManager()
@@ -355,7 +355,7 @@ python3 -m twine check dist/*
 You can also run the CLI as:
 
 ```bash
-python3 -m claude_switch --help
+python3 -m claude_select --help
 ```
 
 ## Runtime Relationship
@@ -426,7 +426,7 @@ The first implementation should not prioritize:
 Before publishing a release:
 
 1. Run the full local quality suite.
-2. Verify `claude-switch capture`, `claude-switch use`, and `build_sdk_env()` against a real local Claude setup.
+2. Verify `claude-select capture`, `claude-select use`, and `build_sdk_env()` against a real local Claude setup.
 3. Update `CHANGELOG.md`.
 4. Create a version tag and publish artifacts built from CI-verified sources.
 

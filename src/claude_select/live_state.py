@@ -12,9 +12,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Protocol
 
-from claude_switch.exceptions import ConfigError
-from claude_switch.models import LiveState
-from claude_switch.paths import get_credentials_path, get_global_config_path
+from claude_select.exceptions import ConfigError
+from claude_select.models import LiveState
+from claude_select.paths import get_credentials_path, get_global_config_path
 
 
 class CredentialStore(Protocol):
@@ -136,7 +136,7 @@ class ClaudeLiveStateBackend:
     ):
         self.config_path = config_path or get_global_config_path(env)
         self.credential_store = credential_store or create_default_credential_store(env)
-        self.backup_dir = backup_dir or (self.config_path.parent / ".claude-switch-backups")
+        self.backup_dir = backup_dir or (self.config_path.parent / ".claude-select-backups")
 
     def read(self) -> LiveState:
         """Read Claude's current live config and credentials."""
