@@ -1,4 +1,6 @@
-# claude-select
+# claude-select 🚀
+
+[English](./README.md) | [简体中文](./README.zh-CN.md)
 
 `claude-select` is a local SDK and CLI design for managing multiple Claude authentication profiles across:
 
@@ -14,7 +16,7 @@ This repository now contains a working first implementation of the design descri
 
 The README still documents the intended architecture so the implementation can evolve without losing the original design constraints.
 
-## Status
+## Status ✅
 
 Current implementation status:
 
@@ -24,7 +26,7 @@ Current implementation status:
 - unit tests are in place
 - lint, type-check, build, and CI configuration are included
 
-## Goals
+## Goals 🎯
 
 - Let a user capture multiple Claude accounts/profiles on one machine.
 - Let the global Claude Code CLI switch between stored profiles.
@@ -55,7 +57,7 @@ This separation is intentional:
 - CLI switching is global and mutates Claude's live state.
 - Agent SDK switching is per-call and should be isolated through `env`.
 
-## Authentication Model
+## Authentication Model 🔐
 
 ### CLI
 
@@ -164,7 +166,7 @@ For Python SDK usage:
 - `build_sdk_env(profile)` should attempt refresh first
 - if refresh fails, raise a clear exception such as `ProfileReauthRequired`
 
-## CLI Design
+## CLI Design 🖥️
 
 Planned commands:
 
@@ -195,7 +197,7 @@ claude-select set-default-sdk <profile>
 - `set-default-sdk <profile>`
   Updates `default_sdk_profile`.
 
-## Python SDK Design
+## Python SDK Design 🐍
 
 Planned primary interface:
 
@@ -290,7 +292,7 @@ Conflicting auth env vars should be removed from the returned environment. For e
 - `CLAUDE_CODE_USE_VERTEX`
 - `CLAUDE_CODE_USE_FOUNDRY`
 
-## How Users Get Started
+## How Users Get Started ✨
 
 Recommended first-run flow:
 
@@ -331,7 +333,7 @@ env = manager.build_sdk_env("work")
 options = ClaudeAgentOptions(env=env)
 ```
 
-## Development
+## Development 🛠️
 
 Set up a local environment:
 
@@ -414,14 +416,14 @@ The first implementation should not prioritize:
 - GUI
 - deep plugin integrations
 
-## Current Limitations
+## Current Limitations ⚠️
 
 - The primary supported profile type today is OAuth captured from Claude CLI live state.
 - macOS keychain reading and writing is implemented, but broader secure-store coverage is still incomplete.
 - Full pre-switch detection of running Claude sessions and IDE integrations is not implemented yet.
 - This project is designed for local single-user machines, not shared multi-user hosts.
 
-## Release Checklist
+## Release Checklist 📦
 
 Before publishing a release:
 
