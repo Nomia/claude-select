@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from claude_switch.exceptions import ProfileReauthRequired
-from claude_switch.manager import ProfileManager
+from claude_select.exceptions import ProfileReauthRequired
+from claude_select.manager import ProfileManager
 
 
 def test_capture_and_switch_updates_live_state(store, fake_live_backend):
