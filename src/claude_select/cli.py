@@ -21,18 +21,36 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init = subparsers.add_parser("init", help="Interactively capture multiple Claude accounts.")
-    init.add_argument("--launch", action="store_true", help="Launch `claude` before each capture.")
+    init.add_argument(
+        "--no-launch",
+        action="store_false",
+        dest="launch",
+        help="Do not launch `claude` automatically before each capture.",
+    )
+    init.set_defaults(launch=True)
 
     add = subparsers.add_parser("add", help="Capture the current Claude account into the registry.")
     add.add_argument("alias", nargs="?")
-    add.add_argument("--launch", action="store_true", help="Launch `claude` before capture.")
+    add.add_argument(
+        "--no-launch",
+        action="store_false",
+        dest="launch",
+        help="Do not launch `claude` automatically before capture.",
+    )
+    add.set_defaults(launch=True)
 
     relogin = subparsers.add_parser(
         "relogin",
         help="Refresh an existing alias by asking the user to log in again.",
     )
     relogin.add_argument("alias")
-    relogin.add_argument("--launch", action="store_true", help="Launch `claude` before capture.")
+    relogin.add_argument(
+        "--no-launch",
+        action="store_false",
+        dest="launch",
+        help="Do not launch `claude` automatically before capture.",
+    )
+    relogin.set_defaults(launch=True)
 
     subparsers.add_parser("list", help="List stored accounts.")
 

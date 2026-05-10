@@ -31,11 +31,15 @@ pip install claude-select
 claude-select init
 ```
 
+默认情况下，`claude-select` 会在当前终端里直接启动 `claude`，然后逐个录入账号。
+
 每个账号的流程是：
 
 1. 给账号起一个别名，比如 `work`、`personal`
-2. 在 Claude Code 里完成 `/login`
-3. 回到向导，让 `claude-select` 把当前登录态采集进本地数据库
+2. `claude-select` 启动 `claude`
+3. 在 `claude` CLI 会话里执行 `/login` 并完成授权
+4. 退出 `claude`，回到 `claude-select`
+5. 按回车，让 `claude-select` 把当前登录态采集进本地数据库
 
 后续也可以单独新增：
 
@@ -43,6 +47,14 @@ claude-select init
 claude-select add work
 claude-select add personal
 ```
+
+如果你不想让 `claude-select` 自动启动 `claude`，可以这样用：
+
+```bash
+claude-select add work --no-launch
+```
+
+这时它会打印文字指导，等待你自己去运行 `claude` 并完成 `/login`。
 
 ### 2. 看当前数据库里有哪些账号
 
@@ -106,8 +118,8 @@ claude-select current
 各命令含义：
 
 - `init`：首次引导录入多个账号
-- `add`：把当前 Claude 登录态录进数据库
-- `relogin`：让用户重新登录后，用新的登录态覆盖某个已存在账号
+- `add`：默认先在当前终端启动 `claude`，然后把当前 Claude 登录态录进数据库
+- `relogin`：默认先在当前终端启动 `claude`，然后让新的登录态覆盖某个已存在账号
 - `list`：查看当前账号表
 - `watch`：持续刷新账号表
 - `select`：把某个已保存账号写回当前 Claude CLI 登录态

@@ -31,11 +31,15 @@ Run the guided bootstrap:
 claude-select init
 ```
 
+By default, `claude-select` launches `claude` in the current terminal for each account capture.
+
 For each account:
 
 1. choose an alias such as `work` or `personal`
-2. complete `/login` in Claude Code
-3. return to the wizard so `claude-select` can capture the current login snapshot
+2. `claude-select` launches `claude`
+3. inside the `claude` CLI session, run `/login` and finish authorization
+4. exit `claude` and return to `claude-select`
+5. press Enter so `claude-select` can capture the current login snapshot
 
 You can add another account later:
 
@@ -43,6 +47,14 @@ You can add another account later:
 claude-select add work
 claude-select add personal
 ```
+
+If you do not want `claude-select` to launch `claude` for you, use:
+
+```bash
+claude-select add work --no-launch
+```
+
+In that mode, `claude-select` will print guidance and wait while you run `claude` and `/login` yourself.
 
 ### 2. See what is stored
 
@@ -106,8 +118,8 @@ claude-select current
 Command behavior:
 
 - `init`: guided multi-account bootstrap
-- `add`: capture the current Claude login into the registry
-- `relogin`: overwrite one stored alias after the user logs in again
+- `add`: launch `claude` in the current terminal by default, then capture the current login into the registry
+- `relogin`: launch `claude` in the current terminal by default, then overwrite one stored alias after the user logs in again
 - `list`: show the current registry table
 - `watch`: keep refreshing the table in the terminal
 - `select`: write one stored snapshot back into Claude's live auth state

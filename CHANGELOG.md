@@ -6,6 +6,14 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-11
+
+### Changed
+
+- Made `init`, `add`, and `relogin` launch `claude` in the current terminal by default.
+- Replaced the old `--launch` opt-in with `--no-launch` opt-out behavior.
+- Updated the English and Chinese README files to describe the current-terminal login flow and fallback guidance.
+
 ## [0.2.0] - 2026-05-11
 
 ### Changed

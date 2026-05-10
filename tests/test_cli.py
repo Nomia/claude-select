@@ -62,6 +62,16 @@ def test_cli_add_relogin_remove_current_plain(monkeypatch, capsys, registry, fak
     assert "Removed work." in output
 
 
+def test_cli_add_no_launch(monkeypatch, registry, fake_auth_backend):
+    manager = AuthManager(registry=registry, auth_backend=fake_auth_backend)
+    monkeypatch.setattr(cli, "AuthManager", lambda: manager)
+    observed: list[bool] = []
+    monkeypatch.setattr(manager, "wait_for_login", lambda launch: observed.append(launch))
+
+    assert cli.main(["add", "work", "--no-launch"]) == 0
+    assert observed == [False]
+
+
 def test_cli_watch_and_interactive_select(monkeypatch, capsys, registry, fake_auth_backend):
     manager = AuthManager(registry=registry, auth_backend=fake_auth_backend)
     manager.capture_current_account("work")

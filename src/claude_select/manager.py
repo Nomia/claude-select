@@ -179,11 +179,19 @@ class AuthManager:
         return "\n".join(lines)
 
     def wait_for_login(self, launch: bool) -> None:
-        """Optionally launch Claude and block until the user confirms login completion."""
-        if launch and shutil.which("claude"):
-            subprocess.run(["claude"], check=False)
+        """Guide the user through logging in with the Claude CLI."""
+        if launch:
+            claude_path = shutil.which("claude")
+            if claude_path:
+                print("Launching `claude` in this terminal.")
+                print("Inside Claude, run `/login` and finish account authorization.")
+                print("When login is complete, exit Claude to return here.")
+                subprocess.run([claude_path], check=False)
+            else:
+                print("`claude` was not found in PATH.")
+                print("Run `claude`, complete `/login`, then return here.")
         else:
-            print("Complete /login in Claude Code, then return here.")
+            print("Run `claude` in another shell, complete `/login`, then return here.")
         input("Press Enter after login is complete...")
 
     def choose_alias_interactively(self) -> str:
