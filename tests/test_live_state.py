@@ -6,11 +6,12 @@ import pytest
 
 from claude_select.exceptions import ConfigError
 from claude_select.live_state import (
-    ClaudeLiveStateBackend,
+    ClaudeAuthBackend,
     FileCredentialStore,
     MacOSKeychainCredentialStore,
+    create_default_credential_store,
 )
-from claude_select.models import LiveState
+from claude_select.models import AuthSnapshot
 
 
 def test_file_credential_store_round_trip(tmp_path):
@@ -19,82 +20,122 @@ def test_file_credential_store_round_trip(tmp_path):
     payload = {"claudeAiOauth": {"accessToken": "token"}}
 
     store.write(payload)
-    loaded = store.read()
 
-    assert loaded == payload
-
-    backup_dir = tmp_path / "backups"
-    store.backup(backup_dir)
-    assert (backup_dir / ".credentials.json").exists()
+    assert store.read() == payload
 
 
-def test_live_state_backend_read_write_round_trip(tmp_path):
+def test_file_credential_store_missing_file(tmp_path):
+    store = FileCredentialStore(tmp_path / "missing.json")
+
+    with pytest.raises(ConfigError):
+        store.read()
+
+
+def test_auth_backend_read_snapshot(tmp_path):
     config_path = tmp_path / ".claude.json"
     credentials_path = tmp_path / ".claude" / ".credentials.json"
     config_path.write_text(
-        json.dumps({"oauthAccount": {"emailAddress": "user@example.com"}, "theme": "dark"}),
+        json.dumps({"oauthAccount": {"emailAddress": "user@example.com"}}),
         encoding="utf-8",
     )
     FileCredentialStore(credentials_path).write(
-        {"claudeAiOauth": {"accessToken": "token", "refreshToken": "refresh"}}
+        {"claudeAiOauth": {"accessToken": "token", "expiresAt": 4102444800000}}
     )
 
-    backend = ClaudeLiveStateBackend(
+    backend = ClaudeAuthBackend(
         config_path=config_path,
         credential_store=FileCredentialStore(credentials_path),
         backup_dir=tmp_path / "backups",
     )
-    live_state = backend.read()
-    assert live_state.config["theme"] == "dark"
 
-    next_state = LiveState(
-        config={"oauthAccount": {"emailAddress": "next@example.com"}, "theme": "light"},
-        credentials={"claudeAiOauth": {"accessToken": "next-token"}},
+    snapshot = backend.read_snapshot()
+
+    assert snapshot.oauth_account["emailAddress"] == "user@example.com"
+
+
+def test_auth_backend_write_snapshot(tmp_path):
+    config_path = tmp_path / ".claude.json"
+    credentials_path = tmp_path / ".claude" / ".credentials.json"
+    config_path.write_text(json.dumps({"theme": "dark"}), encoding="utf-8")
+    store = FileCredentialStore(credentials_path)
+    store.write({"claudeAiOauth": {"accessToken": "old"}})
+    backend = ClaudeAuthBackend(
+        config_path=config_path,
+        credential_store=store,
+        backup_dir=tmp_path / "backups",
     )
-    backend.write(next_state)
+    snapshot = AuthSnapshot(
+        oauth_account={"emailAddress": "next@example.com"},
+        credentials={"claudeAiOauth": {"accessToken": "next"}},
+    )
 
-    assert backend.read().config["oauthAccount"]["emailAddress"] == "next@example.com"
+    backend.write_snapshot(snapshot)
+
+    assert backend.read_snapshot().oauth_account["emailAddress"] == "next@example.com"
+    assert json.loads(config_path.read_text(encoding="utf-8"))["theme"] == "dark"
     assert (tmp_path / "backups" / ".claude.json").exists()
 
 
-def test_live_state_backend_raises_on_invalid_config(tmp_path):
+def test_auth_backend_rejects_invalid_config(tmp_path):
     config_path = tmp_path / ".claude.json"
     credentials_path = tmp_path / ".claude" / ".credentials.json"
-    config_path.write_text(json.dumps({"notOAuth": True}), encoding="utf-8")
+    config_path.write_text(json.dumps({"theme": "dark"}), encoding="utf-8")
     FileCredentialStore(credentials_path).write({"claudeAiOauth": {"accessToken": "token"}})
-
-    backend = ClaudeLiveStateBackend(
+    backend = ClaudeAuthBackend(
         config_path=config_path,
         credential_store=FileCredentialStore(credentials_path),
     )
 
     with pytest.raises(ConfigError):
-        backend.read()
+        backend.read_snapshot()
 
 
-def test_macos_keychain_store(monkeypatch, tmp_path):
-    calls = []
+def test_auth_backend_rejects_invalid_credentials(tmp_path):
+    config_path = tmp_path / ".claude.json"
+    credentials_path = tmp_path / ".claude" / ".credentials.json"
+    config_path.write_text(
+        json.dumps({"oauthAccount": {"emailAddress": "user@example.com"}}),
+        encoding="utf-8",
+    )
+    FileCredentialStore(credentials_path).write({"notOauth": True})
+    backend = ClaudeAuthBackend(
+        config_path=config_path,
+        credential_store=FileCredentialStore(credentials_path),
+    )
 
-    def fake_run(args, check=False, capture_output=False, text=False):
-        calls.append(args)
+    with pytest.raises(ConfigError):
+        backend.read_snapshot()
 
-        class Result:
-            returncode = 0
-            stdout = json.dumps({"claudeAiOauth": {"accessToken": "token"}})
-            stderr = ""
 
-        if check and args[:2] == ["security", "find-generic-password"]:
-            return Result()
-        return Result()
+def test_create_default_credential_store_file_backend(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setattr("platform.system", lambda: "Linux")
 
-    monkeypatch.setattr("claude_select.live_state.subprocess.run", fake_run)
+    store = create_default_credential_store()
 
+    assert isinstance(store, FileCredentialStore)
+
+
+def test_macos_keychain_store(monkeypatch):
+    calls: list[list[str]] = []
+
+    class Result:
+        def __init__(self, *, stdout: str = "", stderr: str = "", returncode: int = 0):
+            self.stdout = stdout
+            self.stderr = stderr
+            self.returncode = returncode
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        if command[:2] == ["security", "find-generic-password"]:
+            return Result(stdout='{"claudeAiOauth":{"accessToken":"token"}}')
+        return Result(returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
     store = MacOSKeychainCredentialStore(account_name="tester")
-    loaded = store.read()
-    store.write({"claudeAiOauth": {"accessToken": "next"}})
-    store.backup(tmp_path / "backup")
 
-    assert loaded["claudeAiOauth"]["accessToken"] == "token"
+    assert store.read()["claudeAiOauth"]["accessToken"] == "token"
+    store.write({"claudeAiOauth": {"accessToken": "next"}})
+
     assert calls[0][:2] == ["security", "find-generic-password"]
     assert calls[1][:2] == ["security", "add-generic-password"]
-    assert (tmp_path / "backup" / "keychain-credentials.json").exists()

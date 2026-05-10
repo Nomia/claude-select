@@ -1,4 +1,4 @@
-"""Path helpers for claude-select and Claude live config discovery."""
+"""Path helpers for claude-select and Claude auth files."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def get_global_config_path(env: Mapping[str, str] | None = None) -> Path:
 
 
 def get_credentials_path(env: Mapping[str, str] | None = None) -> Path:
-    """Return Claude's credentials path for file-backed platforms."""
+    """Return Claude's file-backed credentials path."""
     return get_claude_config_home(env) / ".credentials.json"
 
 
@@ -43,3 +43,9 @@ def get_default_store_root(env: Mapping[str, str] | None = None) -> Path:
     if xdg_config_home:
         return Path(xdg_config_home).expanduser() / "claude-select"
     return Path.home() / ".config" / "claude-select"
+
+
+def get_registry_db_path(env: Mapping[str, str] | None = None) -> Path:
+    """Return the SQLite registry path."""
+    return get_default_store_root(env) / "registry.db"
+

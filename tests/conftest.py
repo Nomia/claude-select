@@ -4,21 +4,19 @@ import copy
 
 import pytest
 
-from claude_select.live_state import ClaudeLiveStateBackend
-from claude_select.models import LiveState
-from claude_select.store import FileProfileStore
+from claude_select.live_state import ClaudeAuthBackend
+from claude_select.models import AuthSnapshot
+from claude_select.store import AuthRegistry
 
 
 @pytest.fixture
-def sample_live_state() -> LiveState:
-    return LiveState(
-        config={
-            "oauthAccount": {
-                "emailAddress": "work@example.com",
-                "organizationUuid": "org-123",
-                "organizationName": "Example Org",
-                "accountUuid": "acct-123",
-            }
+def sample_snapshot() -> AuthSnapshot:
+    return AuthSnapshot(
+        oauth_account={
+            "emailAddress": "work@example.com",
+            "organizationUuid": "org-123",
+            "organizationName": "Example Org",
+            "accountUuid": "acct-123",
         },
         credentials={
             "claudeAiOauth": {
@@ -31,30 +29,30 @@ def sample_live_state() -> LiveState:
     )
 
 
-class FakeLiveStateBackend(ClaudeLiveStateBackend):
-    def __init__(self, live_state: LiveState):
-        self._live_state = live_state
-        self.written_state: LiveState | None = None
+class FakeAuthBackend(ClaudeAuthBackend):
+    def __init__(self, snapshot: AuthSnapshot):
+        self.snapshot = snapshot
+        self.written_snapshot: AuthSnapshot | None = None
 
-    def read(self) -> LiveState:
-        return LiveState(
-            config=copy.deepcopy(self._live_state.config),
-            credentials=copy.deepcopy(self._live_state.credentials),
+    def read_snapshot(self) -> AuthSnapshot:
+        return AuthSnapshot(
+            oauth_account=copy.deepcopy(self.snapshot.oauth_account),
+            credentials=copy.deepcopy(self.snapshot.credentials),
         )
 
-    def write(self, live_state: LiveState) -> None:
-        self.written_state = LiveState(
-            config=copy.deepcopy(live_state.config),
-            credentials=copy.deepcopy(live_state.credentials),
+    def write_snapshot(self, snapshot: AuthSnapshot) -> None:
+        self.written_snapshot = AuthSnapshot(
+            oauth_account=copy.deepcopy(snapshot.oauth_account),
+            credentials=copy.deepcopy(snapshot.credentials),
         )
-        self._live_state = self.written_state
+        self.snapshot = self.written_snapshot
 
 
 @pytest.fixture
-def store(tmp_path):
-    return FileProfileStore(tmp_path / "store")
+def registry(tmp_path) -> AuthRegistry:
+    return AuthRegistry(tmp_path / "registry.db")
 
 
 @pytest.fixture
-def fake_live_backend(sample_live_state):
-    return FakeLiveStateBackend(sample_live_state)
+def fake_auth_backend(sample_snapshot) -> FakeAuthBackend:
+    return FakeAuthBackend(sample_snapshot)

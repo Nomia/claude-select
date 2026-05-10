@@ -1,214 +1,152 @@
-# claude-select 🚀
+# claude-select 🔐
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+[![PyPI version](https://img.shields.io/pypi/v/claude-select)](https://pypi.org/project/claude-select/)
+[![Python versions](https://img.shields.io/pypi/pyversions/claude-select)](https://pypi.org/project/claude-select/)
+[![CI](https://github.com/Nomia/claude-select/actions/workflows/ci.yml/badge.svg)](https://github.com/Nomia/claude-select/actions/workflows/ci.yml)
 
-`claude-select` is a local SDK and CLI design for managing multiple Claude authentication profiles across:
+[中文说明](./README.zh-CN.md)
 
-- the global Claude Code CLI login state
-- Python programs using the Claude Agent SDK
+`claude-select` is a local Claude auth registry and selector for people who use multiple Claude accounts on one machine.
 
-This repository now contains a working first implementation of the design described below:
+It captures the current Claude CLI login state, stores each account as a snapshot in a local SQLite registry, shows expiry status in a table, and lets you:
 
-- file-backed profile storage
-- CLI profile capture, switch, sync, inspect, remove, and default SDK selection
-- Python `build_sdk_env()` support for direct `ClaudeAgentOptions(env=...)` usage
-- OAuth refresh handling for stored profiles
+- select one stored account back into Claude's live auth state for CLI use
+- read one stored account from Python and build `env` for Claude Agent SDK use
 
-The README still documents the intended architecture so the implementation can evolve without losing the original design constraints.
+It does **not** auto-refresh OAuth tokens. It trusts the captured `expiresAt` value and asks the user to log in again when an account is near expiry or expired.
 
-## Status ✅
-
-Current implementation status:
-
-- `ProfileManager` and top-level `build_sdk_env()` are implemented
-- CLI commands are implemented for local single-user usage
-- OAuth refresh is implemented for stored profiles
-- unit tests are in place
-- lint, type-check, build, and CI configuration are included
-
-## Goals 🎯
-
-- Let a user capture multiple Claude accounts/profiles on one machine.
-- Let the global Claude Code CLI switch between stored profiles.
-- Let Python programs select a profile explicitly for each Claude Agent SDK call.
-- Share one profile store between CLI switching and Python SDK usage.
-- Avoid coupling Python SDK requests to the current global CLI account.
-
-## Non-goals
-
-- Replacing Claude's official login flow.
-- Building a hosted multi-user auth product.
-- Relying on global process-wide environment mutation for Python SDK calls.
-- Treating Agent SDK auth and CLI live auth as the same runtime state.
-
-## Core Model
-
-The design separates three concepts:
-
-1. `profiles`
-   Stored account/auth profiles shared by CLI and Python SDK usage.
-2. `current_cli_profile`
-   The profile currently written into Claude Code's live login state.
-3. `default_sdk_profile`
-   The fallback profile used by Python helpers when the caller does not explicitly choose one.
-
-This separation is intentional:
-
-- CLI switching is global and mutates Claude's live state.
-- Agent SDK switching is per-call and should be isolated through `env`.
-
-## Authentication Model 🔐
-
-### CLI
-
-For the Claude Code CLI, switching works by reading and writing Claude's live login state:
-
-- `~/.claude.json` or `~/.claude/.config.json`
-- `~/.claude/.credentials.json`
-- platform-specific secure storage where applicable
-- `CLAUDE_CONFIG_DIR` when set
-
-The SDK captures the current live state into a reusable profile, then later writes a chosen profile back into the live Claude files when the user switches.
-
-### Python Agent SDK
-
-For Python, the preferred model is explicit per-call environment injection:
-
-```python
-env = manager.build_sdk_env("work")
-options = ClaudeAgentOptions(env=env)
-```
-
-This avoids:
-
-- mutating global `os.environ`
-- leaking one profile into another concurrent request
-- forcing Python usage to follow whatever the CLI currently uses
-
-## Shared Store Design
-
-The SDK owns a profile store separate from Claude's live runtime files.
-
-Recommended structure:
-
-```text
-~/.config/claude-select/
-  state.json
-  secrets/
-    work.json
-    personal.json
-```
-
-### `state.json`
-
-Holds non-sensitive metadata and pointers:
-
-```json
-{
-  "version": 1,
-  "current_cli_profile": "personal",
-  "default_sdk_profile": "work",
-  "profiles": {
-    "work": {
-      "id": "work",
-      "kind": "oauth",
-      "label": "work",
-      "email": "user@example.com",
-      "organization_id": "org_xxx",
-      "organization_name": "Example Org",
-      "auth_state": "ok",
-      "expires_at": 1760000000000,
-      "secret_ref": "work",
-      "updated_at": "2026-04-19T00:00:00Z"
-    }
-  }
-}
-```
-
-### `secrets/<profile>.json`
-
-Holds sensitive auth material:
-
-```json
-{
-  "oauthAccount": {
-    "emailAddress": "user@example.com"
-  },
-  "credentials": {
-    "claudeAiOauth": {
-      "accessToken": "...",
-      "refreshToken": "...",
-      "expiresAt": 1760000000000,
-      "scopes": ["user:profile"]
-    }
-  }
-}
-```
-
-Future versions may replace file-based secret storage with platform keychains while keeping the same `secret_ref` abstraction.
-
-## OAuth Expiry Strategy
-
-When using OAuth-backed profiles:
-
-- Access token near expiry: refresh automatically if `refreshToken` exists.
-- Refresh succeeds: update the profile store before returning.
-- Refresh fails: mark the profile as `reauth_required`.
-
-For CLI switching:
-
-- switching should still be allowed
-- the tool should clearly report that the selected profile now requires `claude` `/login`
-- after re-login, the user runs `capture` or `sync` to update the stored profile
-
-For Python SDK usage:
-
-- `build_sdk_env(profile)` should attempt refresh first
-- if refresh fails, raise a clear exception such as `ProfileReauthRequired`
-
-## CLI Design 🖥️
-
-Planned commands:
+## Install 🚀
 
 ```bash
-claude-select capture <profile>
-claude-select sync [<profile>]
-claude-select list
-claude-select current
-claude-select use <profile>
-claude-select remove <profile>
-claude-select set-default-sdk <profile>
+pip install claude-select
 ```
 
-### Command behavior
+## How Users Get Started 👇
 
-- `capture <profile>`
-  Reads Claude's current live login state and stores it as a named profile.
-- `sync [<profile>]`
-  Updates an existing stored profile from the current live login state.
-- `list`
-  Shows all stored profiles and auth state.
-- `current`
-  Shows the current CLI profile and default SDK profile.
-- `use <profile>`
-  Switches Claude's global live login state to the chosen profile.
-- `remove <profile>`
-  Removes a stored profile from the SDK store.
-- `set-default-sdk <profile>`
-  Updates `default_sdk_profile`.
+### 1. Capture your accounts
 
-## Python SDK Design 🐍
+Run the guided bootstrap:
 
-Planned primary interface:
+```bash
+claude-select init
+```
+
+For each account:
+
+1. choose an alias such as `work` or `personal`
+2. complete `/login` in Claude Code
+3. return to the wizard so `claude-select` can capture the current login snapshot
+
+You can add another account later:
+
+```bash
+claude-select add work
+claude-select add personal
+```
+
+### 2. See what is stored
+
+```bash
+claude-select list
+claude-select watch
+```
+
+Example table:
+
+```text
+Alias     Email             Status          Expires In  Last Selected
+--------  ----------------  --------------  ----------  -------------
+personal  a@example.com     healthy         18h 12m     2h ago
+work      b@company.com     expiring_soon   1h 05m      -
+team-a    c@company.com     expired         expired     3d ago
+```
+
+### 3. Select an account for Claude CLI
+
+```bash
+claude-select select work
+```
+
+This reads the stored snapshot from the local registry and writes it back into Claude's current live auth backend:
+
+- macOS: Keychain + Claude config
+- Linux / Windows: Claude credentials file + Claude config
+
+### 4. Use an account in Python
 
 ```python
-from claude_select import ProfileManager
+from claude_select import AuthManager
+from claude_code_sdk import ClaudeAgentOptions, query
 
-manager = ProfileManager()
+manager = AuthManager()
 env = manager.build_sdk_env("work")
+
+options = ClaudeAgentOptions(env=env)
+
+async for message in query(prompt="analyze this repo", options=options):
+    print(message)
 ```
 
-Planned convenience function:
+The Python side reads from the same local registry, but it does **not** mutate Claude's live auth state.
+
+## CLI Commands 🧰
+
+```bash
+claude-select init
+claude-select add <alias>
+claude-select relogin <alias>
+claude-select list
+claude-select watch
+claude-select select [alias]
+claude-select remove <alias>
+claude-select export-env <alias> --json
+claude-select current
+```
+
+Command behavior:
+
+- `init`: guided multi-account bootstrap
+- `add`: capture the current Claude login into the registry
+- `relogin`: overwrite one stored alias after the user logs in again
+- `list`: show the current registry table
+- `watch`: keep refreshing the table in the terminal
+- `select`: write one stored snapshot back into Claude's live auth state
+- `remove`: delete one stored account
+- `export-env`: print SDK env vars for one alias
+- `current`: show the last alias selected for CLI use
+
+## Python API 🐍
+
+Minimal usage:
+
+```python
+from claude_select import AuthManager
+
+manager = AuthManager()
+
+accounts = manager.list_accounts()
+details = manager.get_account("work")
+env = manager.build_sdk_env("work")
+auth_payload = manager.export_sdk_auth("work")
+```
+
+Current public surface:
+
+```python
+class AuthManager:
+    def list_accounts(self) -> list[dict]: ...
+    def get_account(self, alias: str): ...
+    def capture_current_account(self, alias: str, overwrite: bool = True) -> dict: ...
+    def relogin_account(self, alias: str) -> dict: ...
+    def remove_account(self, alias: str) -> None: ...
+    def select_account(self, alias: str) -> dict: ...
+    def build_sdk_env(self, alias: str, base_env: dict[str, str] | None = None) -> dict[str, str]: ...
+    def export_sdk_auth(self, alias: str) -> dict: ...
+    def current_alias(self) -> str | None: ...
+    def render_table(self) -> str: ...
+```
+
+Top-level helper:
 
 ```python
 from claude_select import build_sdk_env
@@ -216,233 +154,82 @@ from claude_select import build_sdk_env
 env = build_sdk_env("work")
 ```
 
-### Intended `ProfileManager` surface
+## How Expiry Works ⏳
 
-```python
-class ProfileManager:
-    def list_profiles(self) -> list[str]: ...
-    def capture_cli_profile(self, name: str) -> None: ...
-    def sync_cli_profile(self, name: str | None = None) -> None: ...
-    def switch_cli(self, name: str) -> None: ...
-    def set_default_sdk_profile(self, name: str) -> None: ...
-    def get_default_sdk_profile(self) -> str | None: ...
-    def inspect_profile(self, name: str) -> dict: ...
-    def build_sdk_env(self, name: str | None = None) -> dict[str, str]: ...
-```
+`claude-select` does not refresh tokens automatically.
 
-## Agent SDK Environment Injection
+It only reads the stored `expiresAt` timestamp and derives status from it:
 
-The direct usage style for Python is the intended default:
+- `healthy`: more than 6 hours remain
+- `expiring_soon`: 6 hours or less remain
+- `expired`: already expired
+- `unknown`: no `expiresAt` value was captured
 
-```python
-from claude_select import ProfileManager
-from claude_code_sdk import ClaudeAgentOptions, query
+When an account is expired:
 
-manager = ProfileManager()
-
-env = manager.build_sdk_env("work")
-options = ClaudeAgentOptions(env=env)
-
-async for message in query(
-    prompt="Analyze this repository",
-    options=options,
-):
-    print(message)
-```
-
-### Why this is the default
-
-- explicit per-call behavior
-- works with async and concurrent tasks
-- no hidden global mutation
-- lets one process use multiple profiles safely
-
-## Environment Variables by Profile Type
-
-`build_sdk_env()` will return a clean environment map for exactly one auth mode.
-
-### OAuth profile
-
-Expected output:
-
-```python
-{
-    "CLAUDE_CODE_OAUTH_TOKEN": "...",
-    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN": "..."
-}
-```
-
-### API key profile
-
-Expected output:
-
-```python
-{
-    "ANTHROPIC_API_KEY": "..."
-}
-```
-
-### Important rule
-
-Conflicting auth env vars should be removed from the returned environment. For example, an OAuth profile should not leave these active:
-
-- `ANTHROPIC_API_KEY`
-- `ANTHROPIC_AUTH_TOKEN`
-- `CLAUDE_CODE_USE_BEDROCK`
-- `CLAUDE_CODE_USE_VERTEX`
-- `CLAUDE_CODE_USE_FOUNDRY`
-
-## How Users Get Started ✨
-
-Recommended first-run flow:
-
-1. Log in with Claude's official CLI flow.
+- `select` fails
+- `build_sdk_env()` fails
+- the user should log in again and run:
 
 ```bash
-claude
+claude-select relogin <alias>
 ```
 
-Then complete `/login`.
+## Storage Model 🗃️
 
-2. Capture the current account into a named profile.
+The registry is stored locally in SQLite:
 
-```bash
-claude-select capture work
-```
+- macOS / Linux default:
+  - `~/.config/claude-select/registry.db`
+- custom XDG config root:
+  - `$XDG_CONFIG_HOME/claude-select/registry.db`
 
-3. Log in with another account if needed, then capture again.
+Each stored account contains:
 
-```bash
-claude-select capture personal
-```
+- alias
+- email
+- organization name / id
+- account uuid
+- captured time
+- expiry time
+- last selected time
+- stored Claude `oauthAccount`
+- stored Claude `claudeAiOauth` credentials payload
 
-4. Switch the global CLI account when needed.
+Claude's own live state remains separate:
 
-```bash
-claude-select use personal
-```
+- global Claude config
+- Claude credentials file or macOS Keychain
 
-5. Use a chosen profile from Python.
+The registry is the source of truth. `select` copies one stored snapshot back into Claude's live state.
 
-```python
-from claude_select import ProfileManager
-from claude_code_sdk import ClaudeAgentOptions
+## Current Limitations ⚠️
 
-manager = ProfileManager()
-env = manager.build_sdk_env("work")
-options = ClaudeAgentOptions(env=env)
-```
+- This project currently centers on captured Claude OAuth snapshots.
+- It does not auto-refresh tokens.
+- It relies on the structure of Claude's current local auth state.
+- Expiry monitoring is local-only; it does not call a remote validation API.
+- Selecting an account updates the local machine's active Claude login state.
 
 ## Development 🛠️
 
-Set up a local environment:
+Install dev dependencies:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -e ".[dev]"
+pip install -e .[dev]
 ```
 
-Run the full local quality suite:
+Run checks:
 
 ```bash
 ruff check .
 ruff format --check .
 mypy
-python3 -m pytest
-python3 -m build
-python3 -m twine check dist/*
+pytest
+python -m build
+python -m twine check dist/*
 ```
 
-You can also run the CLI as:
+## License 📄
 
-```bash
-python3 -m claude_select --help
-```
-
-## Runtime Relationship
-
-The intended data flow is:
-
-- CLI capture: Claude live state -> SDK profile store
-- CLI switch: SDK profile store -> Claude live state
-- Python SDK usage: SDK profile store -> `env`
-
-The Python SDK should not depend on the current global CLI account unless the caller explicitly chooses the same profile.
-
-## Safety and Concurrency
-
-Implementation should include:
-
-- file locking during capture, sync, switch, and refresh
-- atomic writes for state and secret files
-- backups before mutating Claude live files
-- detection of running Claude CLI / IDE instances
-- clear messaging when restart or re-login is required
-
-Current status:
-
-- file locking is implemented for the SDK profile store
-- atomic file writes are implemented for profile and live-state file writes
-- live-state backups are implemented before Claude auth mutation
-- full Claude process detection is not implemented yet
-
-## Status Values
-
-Each profile should expose a simple auth status:
-
-- `ok`
-- `expiring_soon`
-- `refreshable`
-- `reauth_required`
-- `invalid`
-
-These statuses should be visible in `list` and `inspect_profile`.
-
-## Scope of First Implementation
-
-The first implementation should prioritize:
-
-1. file-based profile store
-2. OAuth profile capture from Claude CLI live state
-3. CLI switching between stored OAuth profiles
-4. `build_sdk_env(profile)` for Python Agent SDK usage
-5. token refresh for OAuth-backed profiles
-
-The first implementation should not prioritize:
-
-- hosted sync
-- multi-user remote storage
-- GUI
-- deep plugin integrations
-
-## Current Limitations ⚠️
-
-- The primary supported profile type today is OAuth captured from Claude CLI live state.
-- macOS keychain reading and writing is implemented, but broader secure-store coverage is still incomplete.
-- Full pre-switch detection of running Claude sessions and IDE integrations is not implemented yet.
-- This project is designed for local single-user machines, not shared multi-user hosts.
-
-## Release Checklist 📦
-
-Before publishing a release:
-
-1. Run the full local quality suite.
-2. Verify `claude-select capture`, `claude-select use`, and `build_sdk_env()` against a real local Claude setup.
-3. Update `CHANGELOG.md`.
-4. Create a version tag and publish artifacts built from CI-verified sources.
-
-## References
-
-This design is informed by the following projects:
-
-- [Leuconoe/ClaudeCodeMultiAccounts](https://github.com/Leuconoe/ClaudeCodeMultiAccounts)
-- [realiti4/claude-swap](https://github.com/realiti4/claude-swap)
-
-## Current State
-
-The repository contains a tested first implementation aimed at local single-user usage. Future work can harden:
-
-- platform keychain integration beyond the current file-backed path and macOS keychain support
-- richer process detection before CLI switching
-- broader profile kinds beyond OAuth-backed profiles
+MIT

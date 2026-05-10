@@ -1,51 +1,44 @@
 from __future__ import annotations
 
-from claude_select.models import ProfileMetadata, SecretPayload
+from claude_select.store import AuthRegistry
 
 
-def test_upsert_and_load_profile(store):
-    profile = ProfileMetadata(
-        id="work",
-        kind="oauth",
-        label="work",
+def test_registry_upsert_and_get(registry: AuthRegistry, sample_snapshot):
+    registry.upsert_account(
+        alias="work",
         email="work@example.com",
-        secret_ref="work",
-        auth_state="ok",
+        organization_name="Example Org",
+        organization_id="org-123",
+        account_uuid="acct-123",
+        captured_at="2026-05-10T00:00:00Z",
+        expires_at=4102444800000,
+        last_selected_at=None,
+        source="claude_cli",
+        snapshot=sample_snapshot,
     )
-    secret = SecretPayload(
-        oauth_account={"emailAddress": "work@example.com"},
-        credentials={"claudeAiOauth": {"accessToken": "token"}},
-    )
 
-    store.upsert_profile(profile, secret)
+    details = registry.get_account("work")
 
-    loaded = store.get_profile("work")
-    loaded_secret = store.get_secret("work")
-
-    assert loaded.email == "work@example.com"
-    assert loaded_secret.credentials["claudeAiOauth"]["accessToken"] == "token"
+    assert details.record.alias == "work"
+    assert details.record.email == "work@example.com"
+    assert details.snapshot.credentials["claudeAiOauth"]["accessToken"] == "access-1"
 
 
-def test_remove_profile_clears_pointers(store):
-    profile = ProfileMetadata(
-        id="work",
-        kind="oauth",
-        label="work",
+def test_registry_mark_selected(registry: AuthRegistry, sample_snapshot):
+    registry.upsert_account(
+        alias="work",
         email="work@example.com",
-        secret_ref="work",
-        auth_state="ok",
+        organization_name="Example Org",
+        organization_id="org-123",
+        account_uuid="acct-123",
+        captured_at="2026-05-10T00:00:00Z",
+        expires_at=4102444800000,
+        last_selected_at=None,
+        source="claude_cli",
+        snapshot=sample_snapshot,
     )
-    secret = SecretPayload(
-        oauth_account={"emailAddress": "work@example.com"},
-        credentials={"claudeAiOauth": {"accessToken": "token"}},
-    )
-    store.upsert_profile(profile, secret)
-    store.set_current_cli_profile("work")
-    store.set_default_sdk_profile("work")
 
-    store.remove_profile("work")
+    registry.mark_selected("work", "2026-05-10T01:00:00Z")
 
-    state = store.load_state()
-    assert state.current_cli_profile is None
-    assert state.default_sdk_profile is None
-    assert state.profiles == {}
+    assert registry.get_current_alias() == "work"
+    assert registry.get_account("work").record.last_selected_at == "2026-05-10T01:00:00Z"

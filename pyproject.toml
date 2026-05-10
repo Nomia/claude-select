@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "claude-select"
 version = "0.1.0"
-description = "Manage multiple Claude auth profiles for the Claude Code CLI and Python Agent SDK usage."
+description = "Manage a local registry of Claude login snapshots for CLI selection and Python SDK usage."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

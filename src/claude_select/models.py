@@ -1,140 +1,112 @@
-"""Data models for profile metadata and Claude live state."""
+"""Data models used by the auth registry."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-AUTH_STATE_OK = "ok"
-AUTH_STATE_EXPIRING_SOON = "expiring_soon"
-AUTH_STATE_REFRESHABLE = "refreshable"
-AUTH_STATE_REAUTH_REQUIRED = "reauth_required"
-AUTH_STATE_INVALID = "invalid"
+WARNING_WINDOW_SECONDS = 6 * 60 * 60
 
-PROFILE_KIND_OAUTH = "oauth"
+STATUS_HEALTHY = "healthy"
+STATUS_EXPIRING_SOON = "expiring_soon"
+STATUS_EXPIRED = "expired"
+STATUS_UNKNOWN = "unknown"
+
+
+def utc_now() -> datetime:
+    """Return the current UTC datetime."""
+    return datetime.now(tz=UTC)
 
 
 def utc_now_iso() -> str:
     """Return the current UTC timestamp in ISO format."""
-    return datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso8601(value: str | None) -> datetime | None:
+    """Parse a normalized UTC timestamp or return None."""
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def compute_status(expires_at: int | None, now: datetime | None = None) -> str:
+    """Compute account health from an epoch-milliseconds expiry."""
+    if expires_at is None:
+        return STATUS_UNKNOWN
+    current = now or utc_now()
+    remaining = int(expires_at / 1000 - current.timestamp())
+    if remaining <= 0:
+        return STATUS_EXPIRED
+    if remaining <= WARNING_WINDOW_SECONDS:
+        return STATUS_EXPIRING_SOON
+    return STATUS_HEALTHY
+
+
+def format_remaining(expires_at: int | None, now: datetime | None = None) -> str:
+    """Format time until expiry for human-readable table output."""
+    if expires_at is None:
+        return "unknown"
+    current = now or utc_now()
+    remaining = int(expires_at / 1000 - current.timestamp())
+    if remaining <= 0:
+        return "expired"
+    hours, remainder = divmod(remaining, 3600)
+    minutes = remainder // 60
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
 
 
 @dataclass(slots=True)
-class ProfileMetadata:
-    """Non-sensitive profile metadata persisted in state.json."""
-
-    id: str
-    kind: str
-    label: str
-    email: str
-    organization_id: str = ""
-    organization_name: str = ""
-    account_uuid: str = ""
-    auth_state: str = AUTH_STATE_INVALID
-    expires_at: int | None = None
-    secret_ref: str = ""
-    updated_at: str = field(default_factory=utc_now_iso)
-    last_refresh_at: str | None = None
-    last_refresh_error: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the profile metadata to a JSON-safe dict."""
-        return {
-            "id": self.id,
-            "kind": self.kind,
-            "label": self.label,
-            "email": self.email,
-            "organization_id": self.organization_id,
-            "organization_name": self.organization_name,
-            "account_uuid": self.account_uuid,
-            "auth_state": self.auth_state,
-            "expires_at": self.expires_at,
-            "secret_ref": self.secret_ref,
-            "updated_at": self.updated_at,
-            "last_refresh_at": self.last_refresh_at,
-            "last_refresh_error": self.last_refresh_error,
-        }
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> ProfileMetadata:
-        """Deserialize a profile metadata dict."""
-        return cls(
-            id=str(value["id"]),
-            kind=str(value["kind"]),
-            label=str(value["label"]),
-            email=str(value["email"]),
-            organization_id=str(value.get("organization_id", "")),
-            organization_name=str(value.get("organization_name", "")),
-            account_uuid=str(value.get("account_uuid", "")),
-            auth_state=str(value.get("auth_state", AUTH_STATE_INVALID)),
-            expires_at=value.get("expires_at"),
-            secret_ref=str(value.get("secret_ref", value["id"])),
-            updated_at=str(value.get("updated_at", utc_now_iso())),
-            last_refresh_at=value.get("last_refresh_at"),
-            last_refresh_error=value.get("last_refresh_error"),
-        )
-
-
-@dataclass(slots=True)
-class SecretPayload:
-    """Sensitive auth material stored separately from the profile metadata."""
+class AuthSnapshot:
+    """Captured Claude auth payload."""
 
     oauth_account: dict[str, Any]
     credentials: dict[str, Any]
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the secret payload."""
-        return {
-            "oauthAccount": self.oauth_account,
-            "credentials": self.credentials,
-        }
+    def expires_at(self) -> int | None:
+        """Return the OAuth expiry epoch milliseconds if available."""
+        oauth = self.credentials.get("claudeAiOauth", {})
+        expires_at = oauth.get("expiresAt")
+        return expires_at if isinstance(expires_at, int) else None
 
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> SecretPayload:
-        """Deserialize a secret payload dict."""
-        return cls(
-            oauth_account=dict(value.get("oauthAccount", {})),
-            credentials=dict(value.get("credentials", {})),
-        )
-
-
-@dataclass(slots=True)
-class LiveState:
-    """Claude live runtime state."""
-
-    config: dict[str, Any]
-    credentials: dict[str, Any]
+    def scopes(self) -> list[str]:
+        """Return normalized scopes."""
+        oauth = self.credentials.get("claudeAiOauth", {})
+        raw = oauth.get("scopes")
+        if not isinstance(raw, list):
+            return []
+        return [str(scope) for scope in raw]
 
 
 @dataclass(slots=True)
-class StateFile:
-    """In-memory representation of state.json."""
+class AccountRecord:
+    """Account metadata stored in the registry database."""
 
-    version: int = 1
-    current_cli_profile: str | None = None
-    default_sdk_profile: str | None = None
-    profiles: dict[str, ProfileMetadata] = field(default_factory=dict)
+    alias: str
+    email: str
+    organization_name: str
+    organization_id: str
+    account_uuid: str
+    captured_at: str
+    expires_at: int | None
+    last_selected_at: str | None
+    source: str
 
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize the state file."""
-        return {
-            "version": self.version,
-            "current_cli_profile": self.current_cli_profile,
-            "default_sdk_profile": self.default_sdk_profile,
-            "profiles": {key: profile.to_dict() for key, profile in sorted(self.profiles.items())},
-        }
+    def status(self, now: datetime | None = None) -> str:
+        """Return the computed health status."""
+        return compute_status(self.expires_at, now)
 
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> StateFile:
-        """Deserialize a state file dict."""
-        profiles = {
-            key: ProfileMetadata.from_dict(profile)
-            for key, profile in dict(value.get("profiles", {})).items()
-        }
-        return cls(
-            version=int(value.get("version", 1)),
-            current_cli_profile=value.get("current_cli_profile"),
-            default_sdk_profile=value.get("default_sdk_profile"),
-            profiles=profiles,
-        )
+    def expires_in(self, now: datetime | None = None) -> str:
+        """Return human-friendly remaining time."""
+        return format_remaining(self.expires_at, now)
+
+
+@dataclass(slots=True)
+class AccountDetails:
+    """Joined account metadata and snapshot."""
+
+    record: AccountRecord
+    snapshot: AuthSnapshot

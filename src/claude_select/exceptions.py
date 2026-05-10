@@ -1,29 +1,29 @@
-"""Project-specific exceptions."""
+"""Project-specific exceptions for claude-select."""
 
 
-class ClaudeSwitchError(Exception):
+class ClaudeSelectError(Exception):
     """Base error for the package."""
 
 
-class ConfigError(ClaudeSwitchError):
-    """Raised when local Claude configuration is invalid or missing."""
+class ConfigError(ClaudeSelectError):
+    """Raised when Claude live auth state is missing or invalid."""
 
 
-class ProfileNotFoundError(ClaudeSwitchError):
-    """Raised when a named profile does not exist."""
+class AccountNotFoundError(ClaudeSelectError):
+    """Raised when an alias does not exist in the registry."""
 
 
-class ProfileValidationError(ClaudeSwitchError):
-    """Raised when profile input is invalid."""
+class AccountExistsError(ClaudeSelectError):
+    """Raised when an alias already exists and overwrite is not allowed."""
 
 
-class ProfileReauthRequired(ClaudeSwitchError):
-    """Raised when a profile requires the user to login again."""
+class AccountSelectionError(ClaudeSelectError):
+    """Raised when account selection input is invalid."""
 
 
-class OAuthRefreshError(ClaudeSwitchError):
-    """Raised when an OAuth token refresh fails."""
+class AuthExpiredError(ClaudeSelectError):
+    """Raised when a requested account is already expired."""
 
 
-class LockTimeoutError(ClaudeSwitchError):
-    """Raised when a store lock cannot be acquired."""
+class LockTimeoutError(ClaudeSelectError):
+    """Raised when the registry lock cannot be acquired."""

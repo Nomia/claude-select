@@ -1,38 +1,34 @@
-"""ProfileManager implementation."""
+"""High-level auth registry manager and SDK helpers."""
 
 from __future__ import annotations
 
-import copy
 import os
 import re
+import shutil
+import subprocess
 from dataclasses import asdict
 from typing import Any
 
 from claude_select.exceptions import (
+    AccountExistsError,
+    AccountNotFoundError,
+    AccountSelectionError,
+    AuthExpiredError,
     ConfigError,
-    ProfileNotFoundError,
-    ProfileReauthRequired,
-    ProfileValidationError,
 )
-from claude_select.live_state import ClaudeLiveStateBackend
+from claude_select.live_state import ClaudeAuthBackend
 from claude_select.models import (
-    AUTH_STATE_REFRESHABLE,
-    PROFILE_KIND_OAUTH,
-    LiveState,
-    ProfileMetadata,
-    SecretPayload,
+    STATUS_EXPIRED,
+    AccountDetails,
+    AccountRecord,
+    AuthSnapshot,
+    parse_iso8601,
+    utc_now,
     utc_now_iso,
 )
-from claude_select.oauth import (
-    classify_auth_state,
-    mark_refresh_failure,
-    mark_refresh_success,
-    refresh_secret_payload,
-    update_profile_auth_metadata,
-)
-from claude_select.store import FileProfileStore
+from claude_select.store import AuthRegistry
 
-PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+ALIAS_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 CONFLICTING_AUTH_ENV_VARS = {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -40,221 +36,230 @@ CONFLICTING_AUTH_ENV_VARS = {
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
     "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
     "CLAUDE_CODE_OAUTH_SCOPES",
 }
 
 
-class ProfileManager:
-    """Main entry point for profile management."""
+class AuthManager:
+    """Manage local Claude auth snapshots for CLI and SDK consumption."""
 
     def __init__(
         self,
-        store: FileProfileStore | None = None,
-        live_state_backend: ClaudeLiveStateBackend | None = None,
-        refresh_request=None,
+        registry: AuthRegistry | None = None,
+        auth_backend: ClaudeAuthBackend | None = None,
     ):
-        self.store = store or FileProfileStore()
-        self.live_state_backend = live_state_backend or ClaudeLiveStateBackend()
-        self.refresh_request = refresh_request
+        self.registry = registry or AuthRegistry()
+        self.auth_backend = auth_backend or ClaudeAuthBackend()
 
-    def list_profiles(self) -> list[dict[str, Any]]:
-        """Return profile metadata dictionaries."""
-        profiles = []
-        for profile in self.store.list_profiles():
-            secret = self.store.get_secret(profile.secret_ref)
-            update_profile_auth_metadata(profile, secret)
-            self.store.update_profile(profile)
-            profiles.append(asdict(profile))
-        return profiles
+    def list_accounts(self) -> list[dict[str, Any]]:
+        """Return account records as dictionaries for CLI/SDK output."""
+        now = utc_now()
+        rows = []
+        for record in self.registry.list_accounts():
+            payload = asdict(record)
+            payload["status"] = record.status(now)
+            payload["expires_in"] = record.expires_in(now)
+            rows.append(payload)
+        return rows
 
-    def capture_cli_profile(self, name: str) -> dict[str, Any]:
-        """Capture the current Claude CLI live state into a named profile."""
-        profile_name = self._validate_profile_name(name)
-        live_state = self.live_state_backend.read()
-        profile, secret = self._build_profile_from_live_state(profile_name, live_state)
-        self.store.upsert_profile(profile, secret)
-        self.store.set_current_cli_profile(profile_name)
-        if self.get_default_sdk_profile() is None:
-            self.store.set_default_sdk_profile(profile_name)
-        return asdict(profile)
+    def get_account(self, alias: str) -> AccountDetails:
+        """Return one account and snapshot."""
+        return self.registry.get_account(self._normalize_alias(alias))
 
-    def sync_cli_profile(self, name: str | None = None) -> dict[str, Any]:
-        """Update a named profile using the current Claude CLI live state."""
-        state = self.store.load_state()
-        profile_name = name or state.current_cli_profile
-        if not profile_name:
-            raise ProfileValidationError(
-                "No profile name provided and no current CLI profile is set."
+    def capture_current_account(self, alias: str, overwrite: bool = True) -> dict[str, Any]:
+        """Capture the current live auth state into the registry."""
+        normalized = self._normalize_alias(alias)
+        if not overwrite:
+            existing_aliases = {record.alias for record in self.registry.list_accounts()}
+            if normalized in existing_aliases:
+                raise AccountExistsError(f"Account '{normalized}' already exists.")
+        snapshot = self.auth_backend.read_snapshot()
+        record = self._upsert_snapshot(normalized, snapshot)
+        return self._record_payload(record)
+
+    def relogin_account(self, alias: str) -> dict[str, Any]:
+        """Overwrite an existing account using the current live auth state."""
+        normalized = self._normalize_alias(alias)
+        self.registry.get_account(normalized)
+        snapshot = self.auth_backend.read_snapshot()
+        record = self._upsert_snapshot(normalized, snapshot)
+        return self._record_payload(record)
+
+    def remove_account(self, alias: str) -> None:
+        """Delete an account from the registry."""
+        self.registry.remove_account(self._normalize_alias(alias))
+
+    def select_account(self, alias: str) -> dict[str, Any]:
+        """Write a stored auth snapshot back into Claude's live auth backend."""
+        details = self.registry.get_account(self._normalize_alias(alias))
+        if details.record.status() == STATUS_EXPIRED:
+            raise AuthExpiredError(
+                f"Account '{details.record.alias}' is expired. Run relogin before selecting it."
             )
-        if profile_name not in state.profiles:
-            raise ProfileNotFoundError(f"Profile '{profile_name}' was not found.")
-        live_state = self.live_state_backend.read()
-        profile, secret = self._build_profile_from_live_state(profile_name, live_state)
-        self.store.upsert_profile(profile, secret)
-        return asdict(profile)
-
-    def switch_cli(self, name: str) -> dict[str, Any]:
-        """Switch Claude's live state to a named profile."""
-        profile, secret = self._load_profile(name)
-        profile, secret, refresh_error = self._refresh_profile_if_needed(
-            profile,
-            secret,
-            allow_failure=True,
-        )
-        try:
-            current_live_state = self.live_state_backend.read()
-            next_config = copy.deepcopy(current_live_state.config)
-        except ConfigError:
-            next_config = {}
-        next_config["oauthAccount"] = copy.deepcopy(secret.oauth_account)
-        live_state = LiveState(
-            config=next_config,
-            credentials=copy.deepcopy(secret.credentials),
-        )
-        self.live_state_backend.write(live_state)
-        profile.updated_at = utc_now_iso()
-        self.store.upsert_profile(profile, secret)
-        self.store.set_current_cli_profile(profile.id)
-        result = asdict(profile)
-        result["refresh_error"] = refresh_error
-        return result
-
-    def set_default_sdk_profile(self, name: str) -> None:
-        """Set the default profile for SDK env generation."""
-        self._load_profile(name)
-        self.store.set_default_sdk_profile(name)
-
-    def get_default_sdk_profile(self) -> str | None:
-        """Return the default SDK profile if configured."""
-        return self.store.load_state().default_sdk_profile
-
-    def get_current_cli_profile(self) -> str | None:
-        """Return the currently selected CLI profile."""
-        return self.store.load_state().current_cli_profile
-
-    def inspect_profile(self, name: str) -> dict[str, Any]:
-        """Return detailed metadata for one profile."""
-        profile, secret = self._load_profile(name)
-        update_profile_auth_metadata(profile, secret)
-        self.store.update_profile(profile)
-        details = asdict(profile)
-        details["scopes"] = self._get_scopes(secret)
-        return details
-
-    def remove_profile(self, name: str) -> None:
-        """Remove a stored profile."""
-        self._load_profile(name)
-        self.store.remove_profile(name)
+        self.auth_backend.write_snapshot(details.snapshot)
+        selected_at = utc_now_iso()
+        self.registry.mark_selected(details.record.alias, selected_at)
+        refreshed = self.registry.get_account(details.record.alias).record
+        return self._record_payload(refreshed)
 
     def build_sdk_env(
         self,
-        name: str | None = None,
+        alias: str,
         base_env: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        """Build a clean environment mapping for the requested profile."""
-        profile_name = name or self.get_default_sdk_profile()
-        if not profile_name:
-            raise ProfileValidationError(
-                "No profile specified and no default SDK profile is configured."
+        """Return an env mapping for Claude Agent SDK usage.
+
+        Captured auth is treated as a fixed snapshot. This tool does not try to
+        refresh tokens automatically, so only the access token and scopes are
+        exported for SDK consumption.
+        """
+        details = self.registry.get_account(self._normalize_alias(alias))
+        if details.record.status() == STATUS_EXPIRED:
+            raise AuthExpiredError(
+                f"Account '{details.record.alias}' is expired. Run relogin before using it."
             )
-        profile, secret = self._load_profile(profile_name)
-        profile, secret, _refresh_error = self._refresh_profile_if_needed(
-            profile,
-            secret,
-            allow_failure=False,
-        )
         env = dict(base_env if base_env is not None else os.environ)
         for key in CONFLICTING_AUTH_ENV_VARS:
             env.pop(key, None)
-        oauth = secret.credentials["claudeAiOauth"]
+        oauth = details.snapshot.credentials["claudeAiOauth"]
         env["CLAUDE_CODE_OAUTH_TOKEN"] = str(oauth["accessToken"])
-        refresh_token = oauth.get("refreshToken")
-        if refresh_token:
-            env["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"] = str(refresh_token)
-        scopes = oauth.get("scopes")
-        if isinstance(scopes, list) and scopes:
-            env["CLAUDE_CODE_OAUTH_SCOPES"] = " ".join(str(scope) for scope in scopes)
+        scopes = details.snapshot.scopes()
+        if scopes:
+            env["CLAUDE_CODE_OAUTH_SCOPES"] = " ".join(scopes)
         return env
 
-    def _load_profile(self, name: str) -> tuple[ProfileMetadata, SecretPayload]:
-        state = self.store.load_state()
-        if name not in state.profiles:
-            raise ProfileNotFoundError(f"Profile '{name}' was not found.")
-        return state.profiles[name], self.store.get_secret(state.profiles[name].secret_ref)
+    def export_sdk_auth(self, alias: str) -> dict[str, Any]:
+        """Return a structured auth payload for SDK consumers."""
+        details = self.registry.get_account(self._normalize_alias(alias))
+        if details.record.status() == STATUS_EXPIRED:
+            raise AuthExpiredError(
+                f"Account '{details.record.alias}' is expired. Run relogin before using it."
+            )
+        return {
+            "alias": details.record.alias,
+            "email": details.record.email,
+            "status": details.record.status(),
+            "expires_at": details.record.expires_at,
+            "oauth_account": details.snapshot.oauth_account,
+            "credentials": details.snapshot.credentials,
+        }
 
-    def _validate_profile_name(self, name: str) -> str:
-        normalized = name.strip()
+    def current_alias(self) -> str | None:
+        """Return the last selected CLI alias if any."""
+        return self.registry.get_current_alias()
+
+    def render_table(self) -> str:
+        """Render the current account list as a plain-text table."""
+        rows = self.list_accounts()
+        if not rows:
+            return "No accounts have been captured yet."
+        headers = ["Alias", "Email", "Status", "Expires In", "Last Selected"]
+        body = [
+            [
+                row["alias"],
+                row["email"],
+                row["status"],
+                row["expires_in"],
+                self._format_last_selected(row["last_selected_at"]),
+            ]
+            for row in rows
+        ]
+        widths = [
+            max(len(headers[index]), *(len(str(row[index])) for row in body))
+            for index in range(len(headers))
+        ]
+        lines = [
+            "  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)),
+            "  ".join("-" * width for width in widths),
+        ]
+        lines.extend(
+            "  ".join(str(value).ljust(widths[index]) for index, value in enumerate(row))
+            for row in body
+        )
+        return "\n".join(lines)
+
+    def wait_for_login(self, launch: bool) -> None:
+        """Optionally launch Claude and block until the user confirms login completion."""
+        if launch and shutil.which("claude"):
+            subprocess.run(["claude"], check=False)
+        else:
+            print("Complete /login in Claude Code, then return here.")
+        input("Press Enter after login is complete...")
+
+    def choose_alias_interactively(self) -> str:
+        """Prompt the user to choose one of the stored aliases."""
+        accounts = self.registry.list_accounts()
+        if not accounts:
+            raise AccountSelectionError("No accounts are available.")
+        print(self.render_table())
+        raw = input("Select an account by alias: ").strip()
+        normalized = self._normalize_alias(raw)
+        if normalized not in {account.alias for account in accounts}:
+            raise AccountSelectionError(f"Unknown account alias: {normalized}")
+        return normalized
+
+    def _upsert_snapshot(self, alias: str, snapshot: AuthSnapshot) -> AccountRecord:
+        oauth_account = snapshot.oauth_account
+        email = oauth_account.get("emailAddress")
+        if not email:
+            raise ConfigError("Claude oauthAccount is missing emailAddress.")
+        captured_at = utc_now_iso()
+        existing_last_selected = None
+        try:
+            existing_last_selected = self.registry.get_account(alias).record.last_selected_at
+        except AccountNotFoundError:
+            existing_last_selected = None
+        self.registry.upsert_account(
+            alias=alias,
+            email=str(email),
+            organization_name=str(oauth_account.get("organizationName", "") or ""),
+            organization_id=str(oauth_account.get("organizationUuid", "") or ""),
+            account_uuid=str(oauth_account.get("accountUuid", "") or ""),
+            captured_at=captured_at,
+            expires_at=snapshot.expires_at(),
+            last_selected_at=existing_last_selected,
+            source="claude_cli",
+            snapshot=snapshot,
+        )
+        return self.registry.get_account(alias).record
+
+    def _normalize_alias(self, alias: str) -> str:
+        normalized = alias.strip()
         if not normalized:
-            raise ProfileValidationError("Profile name cannot be empty.")
-        if not PROFILE_NAME_RE.match(normalized):
-            raise ProfileValidationError(
-                "Profile name must only contain letters, numbers, dot, underscore, or dash."
+            raise AccountSelectionError("Alias cannot be empty.")
+        if not ALIAS_RE.match(normalized):
+            raise AccountSelectionError(
+                "Alias must contain only letters, numbers, dot, underscore, or dash."
             )
         return normalized
 
-    def _build_profile_from_live_state(
-        self,
-        name: str,
-        live_state: LiveState,
-    ) -> tuple[ProfileMetadata, SecretPayload]:
-        oauth_account = live_state.config.get("oauthAccount")
-        if not isinstance(oauth_account, dict):
-            raise ConfigError("Claude config does not contain oauthAccount.")
-        email = oauth_account.get("emailAddress")
-        if not email:
-            raise ConfigError("Claude config oauthAccount is missing emailAddress.")
-        secret = SecretPayload(
-            oauth_account=copy.deepcopy(oauth_account),
-            credentials=copy.deepcopy(live_state.credentials),
-        )
-        profile = ProfileMetadata(
-            id=name,
-            kind=PROFILE_KIND_OAUTH,
-            label=name,
-            email=str(email),
-            organization_id=str(oauth_account.get("organizationUuid", "") or ""),
-            organization_name=str(oauth_account.get("organizationName", "") or ""),
-            account_uuid=str(oauth_account.get("accountUuid", "") or ""),
-            secret_ref=name,
-        )
-        update_profile_auth_metadata(profile, secret)
-        return profile, secret
-
-    def _refresh_profile_if_needed(
-        self,
-        profile: ProfileMetadata,
-        secret: SecretPayload,
-        *,
-        allow_failure: bool,
-    ) -> tuple[ProfileMetadata, SecretPayload, str | None]:
-        auth_state, _expires_at = classify_auth_state(secret)
-        if auth_state != AUTH_STATE_REFRESHABLE:
-            update_profile_auth_metadata(profile, secret)
-            self.store.update_profile(profile)
-            return profile, secret, None
-        try:
-            refreshed_secret = refresh_secret_payload(secret, request_refresh=self.refresh_request)
-        except Exception as exc:
-            error = str(exc)
-            mark_refresh_failure(profile, error)
-            self.store.upsert_profile(profile, secret)
-            if allow_failure:
-                return profile, secret, error
-            raise ProfileReauthRequired(
-                f"Profile '{profile.id}' requires reauthentication: {error}"
-            ) from exc
-        mark_refresh_success(profile, refreshed_secret)
-        self.store.upsert_profile(profile, refreshed_secret)
-        return profile, refreshed_secret, None
+    def _record_payload(self, record: AccountRecord) -> dict[str, Any]:
+        payload = asdict(record)
+        payload["status"] = record.status()
+        payload["expires_in"] = record.expires_in()
+        return payload
 
     @staticmethod
-    def _get_scopes(secret: SecretPayload) -> list[str]:
-        oauth = secret.credentials.get("claudeAiOauth", {})
-        scopes = oauth.get("scopes", [])
-        return [str(scope) for scope in scopes] if isinstance(scopes, list) else []
+    def _format_last_selected(value: str | None) -> str:
+        if not value:
+            return "-"
+        dt = parse_iso8601(value)
+        if dt is None:
+            return value
+        now = utc_now()
+        delta = now - dt
+        total_minutes = int(delta.total_seconds() // 60)
+        if total_minutes < 1:
+            return "just now"
+        if total_minutes < 60:
+            return f"{total_minutes}m ago"
+        hours = total_minutes // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        days = hours // 24
+        return f"{days}d ago"
 
 
-def build_sdk_env(profile: str, base_env: dict[str, str] | None = None) -> dict[str, str]:
-    """Convenience wrapper around ProfileManager.build_sdk_env."""
-    return ProfileManager().build_sdk_env(profile, base_env=base_env)
+def build_sdk_env(alias: str, base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Convenience wrapper around AuthManager.build_sdk_env."""
+    return AuthManager().build_sdk_env(alias, base_env=base_env)

@@ -1,4 +1,4 @@
-"""Claude live state backends."""
+"""Read and write Claude's live auth state."""
 
 from __future__ import annotations
 
@@ -13,25 +13,25 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from claude_select.exceptions import ConfigError
-from claude_select.models import LiveState
+from claude_select.models import AuthSnapshot
 from claude_select.paths import get_credentials_path, get_global_config_path
 
 
 class CredentialStore(Protocol):
-    """Read and write Claude credentials."""
+    """Protocol for Claude credential backends."""
 
     def read(self) -> dict[str, Any]:
-        """Read the current credentials payload."""
+        """Return current credentials payload."""
 
     def write(self, credentials: dict[str, Any]) -> None:
-        """Write the current credentials payload."""
+        """Write credentials payload."""
 
     def backup(self, destination_dir: Path) -> None:
-        """Back up the credential store if supported."""
+        """Persist a backup copy if supported."""
 
 
 class FileCredentialStore:
-    """File-backed Claude credential storage."""
+    """File-backed Claude credentials."""
 
     def __init__(self, path: Path):
         self.path = path
@@ -58,14 +58,13 @@ class FileCredentialStore:
             os.chmod(self.path, 0o600)
 
     def backup(self, destination_dir: Path) -> None:
-        if not self.path.exists():
-            return
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(self.path, destination_dir / self.path.name)
+        if self.path.exists():
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.path, destination_dir / self.path.name)
 
 
 class MacOSKeychainCredentialStore:
-    """macOS keychain-backed Claude credential storage."""
+    """macOS keychain-backed Claude credentials."""
 
     def __init__(
         self,
@@ -110,22 +109,23 @@ class MacOSKeychainCredentialStore:
 
     def backup(self, destination_dir: Path) -> None:
         destination_dir.mkdir(parents=True, exist_ok=True)
-        backup_file = destination_dir / "keychain-credentials.json"
-        backup_file.write_text(
+        (destination_dir / "keychain-credentials.json").write_text(
             json.dumps(self.read(), indent=2, sort_keys=True),
             encoding="utf-8",
         )
 
 
-def create_default_credential_store(env: dict[str, str] | None = None) -> CredentialStore:
-    """Create the default credential store for the current platform."""
+def create_default_credential_store(
+    env: dict[str, str] | None = None,
+) -> CredentialStore:
+    """Create the default store for the current platform."""
     if platform.system() == "Darwin":
         return MacOSKeychainCredentialStore()
     return FileCredentialStore(get_credentials_path(env))
 
 
-class ClaudeLiveStateBackend:
-    """Reads and writes Claude's live runtime auth state."""
+class ClaudeAuthBackend:
+    """Read and write Claude's current active auth snapshot."""
 
     def __init__(
         self,
@@ -138,23 +138,30 @@ class ClaudeLiveStateBackend:
         self.credential_store = credential_store or create_default_credential_store(env)
         self.backup_dir = backup_dir or (self.config_path.parent / ".claude-select-backups")
 
-    def read(self) -> LiveState:
-        """Read Claude's current live config and credentials."""
+    def read_snapshot(self) -> AuthSnapshot:
+        """Read the current Claude live auth snapshot."""
         if not self.config_path.exists():
             raise ConfigError(f"Claude config file not found: {self.config_path}")
         with self.config_path.open("r", encoding="utf-8") as handle:
             config = json.load(handle)
-        credentials = self.credential_store.read()
         oauth_account = config.get("oauthAccount")
         if not isinstance(oauth_account, dict) or not oauth_account.get("emailAddress"):
             raise ConfigError("Claude config does not contain a valid oauthAccount.")
+        credentials = self.credential_store.read()
         if not isinstance(credentials.get("claudeAiOauth"), dict):
             raise ConfigError("Claude credentials do not contain a valid claudeAiOauth payload.")
-        return LiveState(config=config, credentials=credentials)
+        return AuthSnapshot(oauth_account=oauth_account, credentials=credentials)
 
-    def write(self, live_state: LiveState) -> None:
-        """Write Claude's current live config and credentials."""
-        self.backup()
+    def write_snapshot(self, snapshot: AuthSnapshot) -> None:
+        """Write a selected auth snapshot back into Claude's live state."""
+        self._backup_live_state()
+        config: dict[str, Any]
+        if self.config_path.exists():
+            with self.config_path.open("r", encoding="utf-8") as handle:
+                config = json.load(handle)
+        else:
+            config = {}
+        config["oauthAccount"] = snapshot.oauth_account
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             "w",
@@ -162,14 +169,14 @@ class ClaudeLiveStateBackend:
             dir=self.config_path.parent,
             delete=False,
         ) as handle:
-            json.dump(live_state.config, handle, indent=2, sort_keys=True)
+            json.dump(config, handle, indent=2, sort_keys=True)
             handle.write("\n")
             temp_name = handle.name
         os.replace(temp_name, self.config_path)
-        self.credential_store.write(live_state.credentials)
+        self.credential_store.write(snapshot.credentials)
 
-    def backup(self) -> None:
-        """Create backups for the live config and credentials."""
+    def _backup_live_state(self) -> None:
+        """Back up current auth files before mutation."""
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         if self.config_path.exists():
             shutil.copy2(self.config_path, self.backup_dir / self.config_path.name)

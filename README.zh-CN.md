@@ -1,246 +1,235 @@
-# claude-select 🚀
+# claude-select 🔐
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+[![PyPI version](https://img.shields.io/pypi/v/claude-select)](https://pypi.org/project/claude-select/)
+[![Python versions](https://img.shields.io/pypi/pyversions/claude-select)](https://pypi.org/project/claude-select/)
+[![CI](https://github.com/Nomia/claude-select/actions/workflows/ci.yml/badge.svg)](https://github.com/Nomia/claude-select/actions/workflows/ci.yml)
 
-`claude-select` 是一个本地 SDK + CLI 工具，用来管理多个 Claude 认证 profile，覆盖两类场景：
+[English README](./README.md)
 
-- 全局 Claude Code CLI 登录态切换
-- Python 程序中 Claude Agent SDK 的按调用切换
+`claude-select` 是一个本地 Claude 多账号认证库和选择器，适合一台机器上同时使用多个 Claude 账号的人。
 
-## 功能概览 ✨
+它会读取当前 Claude CLI 的登录态，把每个账号保存成一份本地快照，存进 SQLite 数据库里，并提供：
 
-- 支持捕获当前 Claude CLI 登录态并保存为 profile
-- 支持在多个本地 profile 之间切换全局 CLI 账号
-- 支持在 Python 里通过 `build_sdk_env()` 为单次 Agent SDK 调用注入认证环境
-- 支持 OAuth token 过期检测与 refresh
-- 支持默认 SDK profile
-- 提供测试、lint、type-check、CI 和发布配置
+- 一个命令行工具，用来查看账号表、监控过期状态、把某个账号切回当前 Claude CLI
+- 一个 Python SDK，用来从数据库读取指定账号，并返回给 Claude Agent SDK 使用
 
-## 适合什么场景 🎯
+它**不会**自动 refresh token。它只根据已捕获的 `expiresAt` 判断是否快过期或已过期，并在需要时要求用户重新登录。
 
-- 你有多个 Claude 账号，想在本机 CLI 间快速切换
-- 你写了基于 Claude Agent SDK 的 Python 工具，希望显式指定“这次调用用哪个账号”
-- 你不想让 Python 代码依赖当前全局 CLI 登录账号
-
-## 不做什么 ❌
-
-- 不替代 Claude 官方 `/login`
-- 不提供托管式多用户认证平台
-- 不推荐通过全局修改 `os.environ` 来切换 Python 调用身份
-- 不把 CLI 当前登录态和 Python 调用时上下文强行绑定成一个状态
-
-## 核心设计 🧠
-
-项目把状态拆成三层：
-
-1. `profiles`
-   所有共享的认证档案，CLI 和 Python 共用
-2. `current_cli_profile`
-   当前写入 Claude live state 的全局 CLI profile
-3. `default_sdk_profile`
-   Python 调用方未显式指定 profile 时使用的默认值
-
-这意味着：
-
-- CLI 切换是全局行为
-- Python Agent SDK 切换是“单次调用级别”的行为
-
-## 安装 📦
+## 安装 🚀
 
 ```bash
 pip install claude-select
 ```
 
-也可以从源码安装：
+## 快速开始 👇
+
+### 1. 先把账号录进去
+
+执行初始化向导：
 
 ```bash
-git clone https://github.com/Nomia/claude-select.git
-cd claude-select
-python3 -m pip install -e ".[dev]"
+claude-select init
 ```
 
-## 快速开始 ⚡
+每个账号的流程是：
 
-### 1. 先用 Claude 官方方式登录
+1. 给账号起一个别名，比如 `work`、`personal`
+2. 在 Claude Code 里完成 `/login`
+3. 回到向导，让 `claude-select` 把当前登录态采集进本地数据库
+
+后续也可以单独新增：
 
 ```bash
-claude
+claude-select add work
+claude-select add personal
 ```
 
-然后在 Claude 中执行 `/login`。
-
-### 2. 把当前账号保存成 profile
+### 2. 看当前数据库里有哪些账号
 
 ```bash
-claude-select capture work
-```
-
-如果你再登录另一个账号，也可以继续保存：
-
-```bash
-claude-select capture personal
-```
-
-### 3. 切换全局 CLI 账号
-
-```bash
-claude-select use work
-claude-select use personal
 claude-select list
-claude-select current
+claude-select watch
 ```
 
-### 4. 在 Python Agent SDK 中使用某个 profile
+展示效果大致如下：
+
+```text
+Alias     Email             Status          Expires In  Last Selected
+--------  ----------------  --------------  ----------  -------------
+personal  a@example.com     healthy         18h 12m     2h ago
+work      b@company.com     expiring_soon   1h 05m      -
+team-a    c@company.com     expired         expired     3d ago
+```
+
+### 3. 给 Claude CLI 切换当前账号
+
+```bash
+claude-select select work
+```
+
+这个命令会从本地数据库读取 `work` 的认证快照，再写回 Claude 当前 live auth backend：
+
+- macOS：Keychain + Claude 配置
+- Linux / Windows：Claude credentials 文件 + Claude 配置
+
+### 4. 在 Python 里使用某个账号
 
 ```python
-from claude_select import ProfileManager
+from claude_select import AuthManager
 from claude_code_sdk import ClaudeAgentOptions, query
 
-manager = ProfileManager()
-
+manager = AuthManager()
 env = manager.build_sdk_env("work")
+
 options = ClaudeAgentOptions(env=env)
 
-async for message in query(
-    prompt="Analyze this repository",
-    options=options,
-):
+async for message in query(prompt="analyze this repo", options=options):
     print(message)
 ```
 
-## CLI 命令 🖥️
+Python 这边和 CLI 共用同一份本地数据库，但它不会改写 Claude 当前登录态。
 
-当前已实现：
+## CLI 命令 🧰
 
 ```bash
-claude-select capture <profile>
-claude-select sync [<profile>]
+claude-select init
+claude-select add <alias>
+claude-select relogin <alias>
 claude-select list
+claude-select watch
+claude-select select [alias]
+claude-select remove <alias>
+claude-select export-env <alias> --json
 claude-select current
-claude-select use <profile>
-claude-select inspect <profile>
-claude-select remove <profile>
-claude-select set-default-sdk <profile>
 ```
 
-这些命令分别用于：
+各命令含义：
 
-- `capture`: 捕获当前 Claude CLI live state
-- `sync`: 用当前 live state 更新一个已有 profile
-- `list`: 列出所有本地 profile
-- `current`: 查看当前 CLI profile 和默认 SDK profile
-- `use`: 切换全局 CLI 账号
-- `inspect`: 查看某个 profile 详情
-- `remove`: 删除本地 profile
-- `set-default-sdk`: 设置默认 SDK profile
+- `init`：首次引导录入多个账号
+- `add`：把当前 Claude 登录态录进数据库
+- `relogin`：让用户重新登录后，用新的登录态覆盖某个已存在账号
+- `list`：查看当前账号表
+- `watch`：持续刷新账号表
+- `select`：把某个已保存账号写回当前 Claude CLI 登录态
+- `remove`：删除某个账号
+- `export-env`：输出给 Claude Agent SDK 使用的环境变量
+- `current`：显示最近一次给 CLI 选中的账号别名
 
 ## Python API 🐍
 
-最常用的是这两个入口：
+最基本的用法：
 
 ```python
-from claude_select import ProfileManager, build_sdk_env
+from claude_select import AuthManager
+
+manager = AuthManager()
+
+accounts = manager.list_accounts()
+details = manager.get_account("work")
+env = manager.build_sdk_env("work")
+auth_payload = manager.export_sdk_auth("work")
 ```
 
-示例：
+当前公开接口：
+
+```python
+class AuthManager:
+    def list_accounts(self) -> list[dict]: ...
+    def get_account(self, alias: str): ...
+    def capture_current_account(self, alias: str, overwrite: bool = True) -> dict: ...
+    def relogin_account(self, alias: str) -> dict: ...
+    def remove_account(self, alias: str) -> None: ...
+    def select_account(self, alias: str) -> dict: ...
+    def build_sdk_env(self, alias: str, base_env: dict[str, str] | None = None) -> dict[str, str]: ...
+    def export_sdk_auth(self, alias: str) -> dict: ...
+    def current_alias(self) -> str | None: ...
+    def render_table(self) -> str: ...
+```
+
+也可以直接用顶层 helper：
 
 ```python
 from claude_select import build_sdk_env
-from claude_code_sdk import ClaudeAgentOptions
 
 env = build_sdk_env("work")
-options = ClaudeAgentOptions(env=env)
 ```
 
-### 为什么推荐这种方式
+## 过期机制 ⏳
 
-- 显式
-- 不污染全局环境变量
-- 适合并发任务
-- 一个进程里可以安全使用多个 profile
+`claude-select` 不会自动 refresh token。
 
-## 存储结构 💾
+它只读取保存时记录下来的 `expiresAt`，然后推导出 4 种状态：
 
-默认本地存储结构类似：
+- `healthy`：距离过期超过 6 小时
+- `expiring_soon`：距离过期不超过 6 小时
+- `expired`：已经过期
+- `unknown`：没有记录到 `expiresAt`
 
-```text
-~/.config/claude-select/
-  state.json
-  secrets/
-    work.json
-    personal.json
+如果账号已经过期：
+
+- `select` 会失败
+- `build_sdk_env()` 会失败
+- 用户需要重新登录，再执行：
+
+```bash
+claude-select relogin <alias>
 ```
 
-- `state.json` 存非敏感元数据和当前指针
-- `secrets/*.json` 存 OAuth 凭证等敏感信息
+## 存储结构 🗃️
 
-Claude 自己的 live state 仍然在它原本的位置，例如：
+本地数据库默认是一个 SQLite 文件：
 
-- `~/.claude.json` 或 `~/.claude/.config.json`
-- `~/.claude/.credentials.json`
-- 某些平台上的系统安全存储
+- macOS / Linux 默认位置：
+  - `~/.config/claude-select/registry.db`
+- 如果设置了 XDG：
+  - `$XDG_CONFIG_HOME/claude-select/registry.db`
 
-## Token 过期怎么处理 🔄
+每个账号会保存这些信息：
 
-对 OAuth profile：
+- alias
+- email
+- organization name / id
+- account uuid
+- captured time
+- expiresAt
+- last selected time
+- Claude 的 `oauthAccount`
+- Claude 的 `claudeAiOauth` credentials payload
 
-- access token 快过期时，优先尝试 refresh
-- refresh 成功后，更新本地 store
-- refresh 失败后，将 profile 标记为 `reauth_required`
+而 Claude 自己当前的 live state 依然是独立的：
 
-对 CLI：
+- Claude 全局配置
+- Claude credentials 文件或 macOS Keychain
 
-- 允许切换
-- 但会提示你重新 `/login`
-- 登录后再执行 `capture` 或 `sync`
-
-对 Python SDK：
-
-- `build_sdk_env()` 会先尝试 refresh
-- 如果失败，会抛出明确异常
+本地数据库是 source of truth。`select` 的作用就是把数据库里的某份快照再写回 Claude 当前 live state。
 
 ## 当前限制 ⚠️
 
-- 当前主路径主要支持 OAuth profile
-- 这是一个面向本地单用户机器的工具
-- 完整的 Claude 运行进程检测还没有实现
-- 更广泛的系统 keyring 支持还可以继续增强
+- 当前主要围绕 Claude OAuth 登录快照工作。
+- 不做自动 refresh。
+- 依赖 Claude 当前本地认证结构没有发生大改。
+- 过期监测只基于本地 `expiresAt`，不会主动请求远端校验。
+- `select` 会直接改掉当前机器上的 Claude 活跃登录态。
 
-## 开发与质量 🛠️
+## 开发 🛠️
 
-本项目包含：
-
-- `pytest`
-- `ruff`
-- `mypy`
-- GitHub Actions CI
-- 打包与 `twine check`
-
-本地开发：
+安装开发依赖：
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -e ".[dev]"
+pip install -e .[dev]
 ```
 
-运行完整检查：
+运行检查：
 
 ```bash
 ruff check .
 ruff format --check .
 mypy
-python3 -m pytest
-python3 -m build
-python3 -m twine check dist/*
+pytest
+python -m build
+python -m twine check dist/*
 ```
 
-## 项目状态 ✅
+## 许可证 📄
 
-当前版本已经：
-
-- 发布到 GitHub
-- 支持 PyPI Trusted Publishing
-- 通过测试、类型检查和打包校验
-
-如果你更关心实现细节、数据模型和发布流程，可以继续看英文版 README，它保留了更完整的设计说明。
+MIT
