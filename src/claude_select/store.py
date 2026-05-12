@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 from claude_select.exceptions import AccountNotFoundError
@@ -33,6 +34,7 @@ class AuthRegistry:
                 """
                     CREATE TABLE IF NOT EXISTS accounts (
                         alias TEXT PRIMARY KEY,
+                        auth_kind TEXT NOT NULL DEFAULT 'cli_snapshot',
                         email TEXT NOT NULL,
                         organization_name TEXT NOT NULL DEFAULT '',
                         organization_id TEXT NOT NULL DEFAULT '',
@@ -46,6 +48,14 @@ class AuthRegistry:
                     )
                     """
             )
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(accounts)").fetchall()
+            }
+            if "auth_kind" not in columns:
+                connection.execute(
+                    "ALTER TABLE accounts ADD COLUMN auth_kind TEXT NOT NULL DEFAULT 'cli_snapshot'"
+                )
             connection.execute(
                 """
                     CREATE TABLE IF NOT EXISTS meta (
@@ -54,11 +64,21 @@ class AuthRegistry:
                     )
                     """
             )
+            connection.execute(
+                """
+                    CREATE TABLE IF NOT EXISTS usage_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        payload_json TEXT NOT NULL,
+                        fetched_at INTEGER NOT NULL
+                    )
+                    """
+            )
 
     def upsert_account(
         self,
         *,
         alias: str,
+        auth_kind: str,
         email: str,
         organization_name: str,
         organization_id: str,
@@ -75,11 +95,12 @@ class AuthRegistry:
             connection.execute(
                 """
                     INSERT INTO accounts (
-                        alias, email, organization_name, organization_id,
+                        alias, auth_kind, email, organization_name, organization_id,
                         account_uuid, captured_at, expires_at, last_selected_at,
                         source, oauth_account_json, credentials_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(alias) DO UPDATE SET
+                        auth_kind=excluded.auth_kind,
                         email=excluded.email,
                         organization_name=excluded.organization_name,
                         organization_id=excluded.organization_id,
@@ -93,6 +114,7 @@ class AuthRegistry:
                     """,
                 (
                     alias,
+                    auth_kind,
                     email,
                     organization_name,
                     organization_id,
@@ -113,7 +135,7 @@ class AuthRegistry:
             cursor = connection.execute(
                 """
                 SELECT alias, email, organization_name, organization_id, account_uuid,
-                       captured_at, expires_at, last_selected_at, source
+                       captured_at, expires_at, last_selected_at, source, auth_kind
                 FROM accounts
                 ORDER BY alias
                 """
@@ -127,7 +149,7 @@ class AuthRegistry:
             cursor = connection.execute(
                 """
                 SELECT alias, email, organization_name, organization_id, account_uuid,
-                       captured_at, expires_at, last_selected_at, source,
+                       captured_at, expires_at, last_selected_at, source, auth_kind,
                        oauth_account_json, credentials_json
                 FROM accounts
                 WHERE alias = ?
@@ -137,10 +159,10 @@ class AuthRegistry:
             row = cursor.fetchone()
         if row is None:
             raise AccountNotFoundError(f"Account '{alias}' was not found.")
-        record = self._row_to_record(row[:9])
+        record = self._row_to_record(row[:10])
         snapshot = AuthSnapshot(
-            oauth_account=json.loads(row[9]),
-            credentials=json.loads(row[10]),
+            oauth_account=json.loads(row[10]),
+            credentials=json.loads(row[11]),
         )
         return AccountDetails(record=record, snapshot=snapshot)
 
@@ -155,6 +177,7 @@ class AuthRegistry:
                 "DELETE FROM meta WHERE key = 'current_alias' AND value = ?",
                 (alias,),
             )
+            connection.execute("DELETE FROM usage_cache WHERE cache_key = ?", (f"alias:{alias}",))
 
     def mark_selected(self, alias: str, selected_at: str) -> None:
         """Persist selection timestamp and current alias metadata."""
@@ -183,6 +206,48 @@ class AuthRegistry:
             ).fetchone()
         return str(row[0]) if row else None
 
+    def set_usage_cache(self, cache_key: str, payload: dict[str, object], fetched_at: int) -> None:
+        """Upsert one cached usage payload."""
+        self.initialize()
+        with self.lock(), self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO usage_cache (cache_key, payload_json, fetched_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    fetched_at = excluded.fetched_at
+                """,
+                (cache_key, json.dumps(payload, sort_keys=True), fetched_at),
+            )
+
+    def get_usage_cache(
+        self,
+        cache_key: str,
+        *,
+        max_age_seconds: int | None,
+        now_epoch: int | None = None,
+    ) -> dict[str, object] | None:
+        """Return one cached usage payload if present and fresh enough."""
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json, fetched_at
+                FROM usage_cache
+                WHERE cache_key = ?
+                """,
+                (cache_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        fetched_at = int(row[1])
+        if max_age_seconds is not None:
+            current = now_epoch if now_epoch is not None else int(time.time())
+            if current - fetched_at > max_age_seconds:
+                return None
+        return json.loads(str(row[0]))
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.execute("PRAGMA foreign_keys = ON")
@@ -197,6 +262,7 @@ class AuthRegistry:
     def _row_to_record(row: tuple[object, ...]) -> AccountRecord:
         return AccountRecord(
             alias=str(row[0]),
+            auth_kind=str(row[9] if row[9] is not None else "cli_snapshot"),
             email=str(row[1]),
             organization_name=str(row[2]),
             organization_id=str(row[3]),
@@ -206,4 +272,3 @@ class AuthRegistry:
             last_selected_at=str(row[7]) if row[7] is not None else None,
             source=str(row[8]),
         )
-

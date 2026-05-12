@@ -175,6 +175,22 @@ class ClaudeAuthBackend:
         os.replace(temp_name, self.config_path)
         self.credential_store.write(snapshot.credentials)
 
+    def describe_targets(self) -> list[str]:
+        """Describe which Claude live-state targets will be updated."""
+        targets = [f"config: {self.config_path}"]
+        if isinstance(self.credential_store, FileCredentialStore):
+            targets.append(f"credentials file: {self.credential_store.path}")
+        elif isinstance(self.credential_store, MacOSKeychainCredentialStore):
+            targets.append(
+                "credentials store: macOS Keychain "
+                f"({self.credential_store.service_name}/{self.credential_store.account_name})"
+            )
+        else:
+            targets.append(
+                f"credentials store: {self.credential_store.__class__.__name__}"
+            )
+        return targets
+
     def _backup_live_state(self) -> None:
         """Back up current auth files before mutation."""
         self.backup_dir.mkdir(parents=True, exist_ok=True)

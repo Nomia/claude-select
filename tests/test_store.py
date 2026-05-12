@@ -6,6 +6,7 @@ from claude_select.store import AuthRegistry
 def test_registry_upsert_and_get(registry: AuthRegistry, sample_snapshot):
     registry.upsert_account(
         alias="work",
+        auth_kind="cli_snapshot",
         email="work@example.com",
         organization_name="Example Org",
         organization_id="org-123",
@@ -27,6 +28,7 @@ def test_registry_upsert_and_get(registry: AuthRegistry, sample_snapshot):
 def test_registry_mark_selected(registry: AuthRegistry, sample_snapshot):
     registry.upsert_account(
         alias="work",
+        auth_kind="cli_snapshot",
         email="work@example.com",
         organization_name="Example Org",
         organization_id="org-123",
@@ -42,3 +44,12 @@ def test_registry_mark_selected(registry: AuthRegistry, sample_snapshot):
 
     assert registry.get_current_alias() == "work"
     assert registry.get_account("work").record.last_selected_at == "2026-05-10T01:00:00Z"
+
+
+def test_registry_usage_cache(registry: AuthRegistry):
+    payload = {"five_hour": {"used_percentage": 24.0}}
+
+    registry.set_usage_cache("alias:work", payload, fetched_at=100)
+
+    assert registry.get_usage_cache("alias:work", max_age_seconds=60, now_epoch=120) == payload
+    assert registry.get_usage_cache("alias:work", max_age_seconds=10, now_epoch=120) is None

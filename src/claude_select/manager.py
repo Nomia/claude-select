@@ -11,6 +11,7 @@ from typing import Any
 
 from claude_select.exceptions import (
     AccountExistsError,
+    AccountKindError,
     AccountNotFoundError,
     AccountSelectionError,
     AuthExpiredError,
@@ -18,6 +19,8 @@ from claude_select.exceptions import (
 )
 from claude_select.live_state import ClaudeAuthBackend
 from claude_select.models import (
+    AUTH_KIND_CLI_SNAPSHOT,
+    AUTH_KIND_TOKEN,
     STATUS_EXPIRED,
     AccountDetails,
     AccountRecord,
@@ -27,6 +30,12 @@ from claude_select.models import (
     utc_now_iso,
 )
 from claude_select.store import AuthRegistry
+from claude_select.usage import (
+    OAuthUsageProvider,
+    UsageProvider,
+    remaining_percentage,
+    reset_countdown,
+)
 
 ALIAS_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 CONFLICTING_AUTH_ENV_VARS = {
@@ -47,11 +56,16 @@ class AuthManager:
         self,
         registry: AuthRegistry | None = None,
         auth_backend: ClaudeAuthBackend | None = None,
+        usage_provider: UsageProvider | None = None,
     ):
         self.registry = registry or AuthRegistry()
         self.auth_backend = auth_backend or ClaudeAuthBackend()
+        self.usage_provider = usage_provider or OAuthUsageProvider(self.registry)
 
-    def list_accounts(self) -> list[dict[str, Any]]:
+    SDK_FIVE_HOUR_LIMIT_PERCENT = 100.0
+    SDK_SEVEN_DAY_LIMIT_PERCENT = 100.0
+
+    def list_accounts(self, include_usage: bool = False) -> list[dict[str, Any]]:
         """Return account records as dictionaries for CLI/SDK output."""
         now = utc_now()
         rows = []
@@ -59,6 +73,13 @@ class AuthManager:
             payload = asdict(record)
             payload["status"] = record.status(now)
             payload["expires_in"] = record.expires_in(now)
+            if include_usage:
+                usage = self._usage_for_alias(record.alias)
+                payload["usage"] = usage
+                payload["quota_5h_left"] = self._format_window_remaining(usage, "five_hour")
+                payload["quota_5h_reset"] = self._format_window_reset(usage, "five_hour")
+                payload["quota_7d_left"] = self._format_window_remaining(usage, "seven_day")
+                payload["quota_7d_reset"] = self._format_window_reset(usage, "seven_day")
             rows.append(payload)
         return rows
 
@@ -77,13 +98,96 @@ class AuthManager:
         record = self._upsert_snapshot(normalized, snapshot)
         return self._record_payload(record)
 
+    def add_token_account(
+        self,
+        alias: str,
+        token: str,
+        *,
+        email: str,
+        organization_name: str = "",
+        organization_id: str = "",
+        account_uuid: str = "",
+        overwrite: bool = True,
+    ) -> dict[str, Any]:
+        """Store a long-lived setup-token entry for SDK/program usage."""
+        normalized = self._normalize_alias(alias)
+        if not overwrite:
+            existing_aliases = {record.alias for record in self.registry.list_accounts()}
+            if normalized in existing_aliases:
+                raise AccountExistsError(f"Account '{normalized}' already exists.")
+        normalized_email = email.strip()
+        if not normalized_email:
+            raise AccountSelectionError("Email cannot be empty for token entries.")
+        snapshot = self._build_token_snapshot(
+            token=token,
+            email=normalized_email,
+            organization_name=organization_name.strip(),
+            organization_id=organization_id.strip(),
+            account_uuid=account_uuid.strip(),
+        )
+        record = self._upsert_snapshot(
+            normalized,
+            snapshot,
+            auth_kind=AUTH_KIND_TOKEN,
+            expires_at_override=self._one_year_expiry_epoch_ms(),
+        )
+        return self._record_payload(record)
+
     def relogin_account(self, alias: str) -> dict[str, Any]:
         """Overwrite an existing account using the current live auth state."""
         normalized = self._normalize_alias(alias)
-        self.registry.get_account(normalized)
+        details = self.registry.get_account(normalized)
+        if details.record.auth_kind != AUTH_KIND_CLI_SNAPSHOT:
+            raise AccountKindError(
+                f"Account '{normalized}' is a token entry and cannot be relogged from Claude CLI."
+            )
         snapshot = self.auth_backend.read_snapshot()
         record = self._upsert_snapshot(normalized, snapshot)
         return self._record_payload(record)
+
+    def sync_current_account(self) -> dict[str, Any]:
+        """Sync Claude's current live auth state back into the matching registry entry."""
+        snapshot = self.auth_backend.read_snapshot()
+        matches = self._matching_aliases(snapshot)
+        if not matches:
+            return {
+                "status": "unregistered",
+                "matched_alias": None,
+                "updated": False,
+                "message": "Current Claude live account is not registered.",
+            }
+        if len(matches) > 1:
+            return {
+                "status": "ambiguous",
+                "matched_alias": None,
+                "updated": False,
+                "message": "Current Claude live account matches multiple aliases.",
+                "candidates": matches,
+            }
+        alias = matches[0]
+        details = self.registry.get_account(alias)
+        before = details.snapshot
+        changed = self._snapshot_changed(before, snapshot)
+        if changed:
+            record = self._sync_snapshot(alias, snapshot)
+            return {
+                "status": "synced",
+                "matched_alias": alias,
+                "updated": True,
+                "record": self._record_payload(record),
+                "previous_expires_at": before.expires_at(),
+                "current_expires_at": snapshot.expires_at(),
+                "message": f"Synced current live auth state into '{alias}'.",
+            }
+        return {
+            "status": "unchanged",
+            "matched_alias": alias,
+            "updated": False,
+            "record": self._record_payload(details.record),
+            "previous_expires_at": before.expires_at(),
+            "current_expires_at": snapshot.expires_at(),
+            "message": f"Current live auth state already matches '{alias}'.",
+        }
 
     def remove_account(self, alias: str) -> None:
         """Delete an account from the registry."""
@@ -92,6 +196,10 @@ class AuthManager:
     def select_account(self, alias: str) -> dict[str, Any]:
         """Write a stored auth snapshot back into Claude's live auth backend."""
         details = self.registry.get_account(self._normalize_alias(alias))
+        if details.record.auth_kind != AUTH_KIND_CLI_SNAPSHOT:
+            raise AccountKindError(
+                f"Account '{details.record.alias}' is a token entry and cannot be selected for CLI."
+            )
         if details.record.status() == STATUS_EXPIRED:
             raise AuthExpiredError(
                 f"Account '{details.record.alias}' is expired. Run relogin before selecting it."
@@ -114,7 +222,10 @@ class AuthManager:
         exported for SDK consumption.
         """
         details = self.registry.get_account(self._normalize_alias(alias))
-        if details.record.status() == STATUS_EXPIRED:
+        if (
+            details.record.auth_kind == AUTH_KIND_CLI_SNAPSHOT
+            and details.record.status() == STATUS_EXPIRED
+        ):
             raise AuthExpiredError(
                 f"Account '{details.record.alias}' is expired. Run relogin before using it."
             )
@@ -128,10 +239,67 @@ class AuthManager:
             env["CLAUDE_CODE_OAUTH_SCOPES"] = " ".join(scopes)
         return env
 
+    def pick_sdk_account(
+        self,
+        preferred_alias: str | None = None,
+    ) -> dict[str, Any]:
+        """Pick the best token entry for SDK/program usage based on quota availability."""
+        candidates = [
+            row
+            for row in self.list_accounts(include_usage=True)
+            if row["auth_kind"] == AUTH_KIND_TOKEN
+        ]
+        if not candidates:
+            raise AccountSelectionError("No token entries are available for SDK auto-selection.")
+
+        preferred: dict[str, Any] | None = None
+        if preferred_alias is not None:
+            normalized = self._normalize_alias(preferred_alias)
+            preferred = next((row for row in candidates if row["alias"] == normalized), None)
+            if preferred is None:
+                raise AccountSelectionError(
+                    f"Preferred SDK alias '{normalized}' is not a token entry."
+                )
+
+        ranked = [row for row in candidates if self._sdk_candidate_available(row)]
+        ranked.sort(key=self._sdk_candidate_sort_key, reverse=True)
+
+        if preferred and self._sdk_candidate_available(preferred):
+            chosen = preferred
+        elif ranked:
+            chosen = ranked[0]
+        else:
+            raise AccountSelectionError(
+                "No token entries currently have quota available for SDK auto-selection."
+            )
+
+        quota = self.get_account_quota(chosen["alias"])
+        return {
+            "alias": chosen["alias"],
+            "email": chosen["email"],
+            "organization_name": chosen["organization_name"],
+            "auth_kind": chosen["auth_kind"],
+            "quota": quota,
+        }
+
+    def build_sdk_env_auto(
+        self,
+        preferred_alias: str | None = None,
+        base_env: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Pick an SDK token entry automatically, then build an env mapping for it."""
+        selected = self.pick_sdk_account(preferred_alias=preferred_alias)
+        env = self.build_sdk_env(selected["alias"], base_env=base_env)
+        env["CLAUDE_SELECT_ALIAS"] = selected["alias"]
+        return env
+
     def export_sdk_auth(self, alias: str) -> dict[str, Any]:
         """Return a structured auth payload for SDK consumers."""
         details = self.registry.get_account(self._normalize_alias(alias))
-        if details.record.status() == STATUS_EXPIRED:
+        if (
+            details.record.auth_kind == AUTH_KIND_CLI_SNAPSHOT
+            and details.record.status() == STATUS_EXPIRED
+        ):
             raise AuthExpiredError(
                 f"Account '{details.record.alias}' is expired. Run relogin before using it."
             )
@@ -148,20 +316,86 @@ class AuthManager:
         """Return the last selected CLI alias if any."""
         return self.registry.get_current_alias()
 
-    def render_table(self) -> str:
+    def current_live_account(self) -> dict[str, Any]:
+        """Return the current Claude live auth state with optional registry match."""
+        snapshot = self.auth_backend.read_snapshot()
+        oauth_account = snapshot.oauth_account
+        expires_at = snapshot.expires_at()
+        payload: dict[str, Any] = {
+            "matched_alias": self._match_snapshot_alias(snapshot),
+            "email": str(oauth_account.get("emailAddress", "") or ""),
+            "organization_name": str(oauth_account.get("organizationName", "") or ""),
+            "organization_id": str(oauth_account.get("organizationUuid", "") or ""),
+            "account_uuid": str(oauth_account.get("accountUuid", "") or ""),
+            "expires_at": expires_at,
+            "status": self._status_from_expires_at(expires_at),
+            "expires_in": self._format_expires_in(expires_at),
+            "targets": self.auth_backend.describe_targets(),
+        }
+        usage = self._usage_for_snapshot(
+            snapshot,
+            payload["matched_alias"] or self._usage_cache_key_for_snapshot(snapshot),
+        )
+        payload["usage"] = usage
+        payload["quota_5h_left"] = self._format_window_remaining(usage, "five_hour")
+        payload["quota_5h_reset"] = self._format_window_reset(usage, "five_hour")
+        payload["quota_7d_left"] = self._format_window_remaining(usage, "seven_day")
+        payload["quota_7d_reset"] = self._format_window_reset(usage, "seven_day")
+        return payload
+
+    def get_live_quota(self) -> dict[str, Any]:
+        """Return quota details for Claude's current live auth state."""
+        current = self.current_live_account()
+        return self._quota_payload(
+            alias=current["matched_alias"],
+            email=current["email"],
+            organization_name=current["organization_name"],
+            organization_id=current["organization_id"],
+            account_uuid=current["account_uuid"],
+            status=current["status"],
+            expires_at=current["expires_at"],
+            expires_in=current["expires_in"],
+            usage=current["usage"],
+        )
+
+    def get_account_quota(self, alias: str) -> dict[str, Any]:
+        """Return quota details for one stored account alias."""
+        details = self.registry.get_account(self._normalize_alias(alias))
+        usage = self._usage_for_alias(details.record.alias)
+        return self._quota_payload(
+            alias=details.record.alias,
+            email=details.record.email,
+            organization_name=details.record.organization_name,
+            organization_id=details.record.organization_id,
+            account_uuid=details.record.account_uuid,
+            status=details.record.status(),
+            expires_at=details.record.expires_at,
+            expires_in=details.record.expires_in(),
+            usage=usage,
+        )
+
+    def list_account_quotas(self) -> list[dict[str, Any]]:
+        """Return quota details for every stored account alias."""
+        return [self.get_account_quota(record.alias) for record in self.registry.list_accounts()]
+
+    def render_table(self, include_usage: bool = False) -> str:
         """Render the current account list as a plain-text table."""
-        rows = self.list_accounts()
+        rows = self.list_accounts(include_usage=include_usage)
         if not rows:
             return "No accounts have been captured yet."
-        headers = ["Alias", "Email", "Status", "Expires In", "Last Selected"]
+        headers = [
+            "Alias",
+            "Kind",
+            "Email",
+            "Organization",
+            "Status",
+            "Expires In",
+            "Last Selected",
+        ]
+        if include_usage:
+            headers.extend(["5h Left", "5h Reset", "7d Left", "7d Reset"])
         body = [
-            [
-                row["alias"],
-                row["email"],
-                row["status"],
-                row["expires_in"],
-                self._format_last_selected(row["last_selected_at"]),
-            ]
+            self._table_row(row, include_usage=include_usage)
             for row in rows
         ]
         widths = [
@@ -176,6 +410,22 @@ class AuthManager:
             "  ".join(str(value).ljust(widths[index]) for index, value in enumerate(row))
             for row in body
         )
+        return "\n".join(lines)
+
+    def render_current_live_account(self) -> str:
+        """Render a short summary of Claude's current live auth state."""
+        current = self.current_live_account()
+        lines = ["Current Claude live account"]
+        lines.append(f"  matched alias: {current['matched_alias'] or '-'}")
+        lines.append(f"  email: {current['email'] or '-'}")
+        lines.append(f"  organization: {current['organization_name'] or '-'}")
+        lines.append(f"  expires in: {current['expires_in']}")
+        lines.append(f"  5h quota left: {current['quota_5h_left']}")
+        lines.append(f"  5h resets in: {current['quota_5h_reset']}")
+        lines.append(f"  7d quota left: {current['quota_7d_left']}")
+        lines.append(f"  7d resets in: {current['quota_7d_reset']}")
+        for target in current["targets"]:
+            lines.append(f"  target: {target}")
         return "\n".join(lines)
 
     def wait_for_login(self, launch: bool) -> None:
@@ -202,11 +452,21 @@ class AuthManager:
         print(self.render_table())
         raw = input("Select an account by alias: ").strip()
         normalized = self._normalize_alias(raw)
-        if normalized not in {account.alias for account in accounts}:
+        cli_aliases = {
+            account.alias for account in accounts if account.auth_kind == AUTH_KIND_CLI_SNAPSHOT
+        }
+        if normalized not in cli_aliases:
             raise AccountSelectionError(f"Unknown account alias: {normalized}")
         return normalized
 
-    def _upsert_snapshot(self, alias: str, snapshot: AuthSnapshot) -> AccountRecord:
+    def _upsert_snapshot(
+        self,
+        alias: str,
+        snapshot: AuthSnapshot,
+        *,
+        auth_kind: str = AUTH_KIND_CLI_SNAPSHOT,
+        expires_at_override: int | None = None,
+    ) -> AccountRecord:
         oauth_account = snapshot.oauth_account
         email = oauth_account.get("emailAddress")
         if not email:
@@ -219,17 +479,70 @@ class AuthManager:
             existing_last_selected = None
         self.registry.upsert_account(
             alias=alias,
+            auth_kind=auth_kind,
             email=str(email),
             organization_name=str(oauth_account.get("organizationName", "") or ""),
             organization_id=str(oauth_account.get("organizationUuid", "") or ""),
             account_uuid=str(oauth_account.get("accountUuid", "") or ""),
             captured_at=captured_at,
-            expires_at=snapshot.expires_at(),
+            expires_at=(
+                expires_at_override
+                if expires_at_override is not None
+                else snapshot.expires_at()
+            ),
             last_selected_at=existing_last_selected,
-            source="claude_cli",
+            source="claude_cli" if auth_kind == AUTH_KIND_CLI_SNAPSHOT else "claude_setup_token",
             snapshot=snapshot,
         )
         return self.registry.get_account(alias).record
+
+    def _sync_snapshot(self, alias: str, snapshot: AuthSnapshot) -> AccountRecord:
+        oauth_account = snapshot.oauth_account
+        email = oauth_account.get("emailAddress")
+        if not email:
+            raise ConfigError("Claude oauthAccount is missing emailAddress.")
+        existing = self.registry.get_account(alias).record
+        self.registry.upsert_account(
+            alias=alias,
+            auth_kind=existing.auth_kind,
+            email=str(email),
+            organization_name=str(oauth_account.get("organizationName", "") or ""),
+            organization_id=str(oauth_account.get("organizationUuid", "") or ""),
+            account_uuid=str(oauth_account.get("accountUuid", "") or ""),
+            captured_at=existing.captured_at,
+            expires_at=snapshot.expires_at(),
+            last_selected_at=existing.last_selected_at,
+            source=existing.source,
+            snapshot=snapshot,
+        )
+        return self.registry.get_account(alias).record
+
+    @staticmethod
+    def _build_token_snapshot(
+        *,
+        token: str,
+        email: str,
+        organization_name: str,
+        organization_id: str,
+        account_uuid: str,
+    ) -> AuthSnapshot:
+        normalized_token = token.strip()
+        if not normalized_token:
+            raise AccountSelectionError("Token cannot be empty.")
+        return AuthSnapshot(
+            oauth_account={
+                "emailAddress": email,
+                "organizationName": organization_name,
+                "organizationUuid": organization_id,
+                "accountUuid": account_uuid,
+            },
+            credentials={
+                "claudeAiOauth": {
+                    "accessToken": normalized_token,
+                    "scopes": [],
+                }
+            },
+        )
 
     def _normalize_alias(self, alias: str) -> str:
         normalized = alias.strip()
@@ -245,7 +558,226 @@ class AuthManager:
         payload = asdict(record)
         payload["status"] = record.status()
         payload["expires_in"] = record.expires_in()
+        payload["display_name"] = self.format_account_label(payload)
         return payload
+
+    @staticmethod
+    def format_account_label(account: AccountRecord | dict[str, Any]) -> str:
+        """Return a compact human-readable label with alias, email, and org."""
+        if isinstance(account, AccountRecord):
+            alias = account.alias
+            auth_kind = account.auth_kind
+            email = account.email
+            organization_name = account.organization_name
+        else:
+            alias = str(account["alias"])
+            auth_kind = str(account.get("auth_kind", "") or "")
+            email = str(account["email"])
+            organization_name = str(account.get("organization_name", "") or "")
+        kind_prefix = "[token] " if auth_kind == AUTH_KIND_TOKEN else ""
+        if organization_name:
+            return f"{kind_prefix}{alias} <{email}> [{organization_name}]"
+        return f"{kind_prefix}{alias} <{email}>"
+
+    def _match_snapshot_alias(self, snapshot: AuthSnapshot) -> str | None:
+        matches = self._matching_aliases(snapshot)
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def _matching_aliases(self, snapshot: AuthSnapshot) -> list[str]:
+        oauth = snapshot.oauth_account
+        snapshot_email = str(oauth.get("emailAddress", "") or "")
+        snapshot_org_id = str(oauth.get("organizationUuid", "") or "")
+        snapshot_account_uuid = str(oauth.get("accountUuid", "") or "")
+        matches: list[str] = []
+        for record in self.registry.list_accounts():
+            if record.auth_kind != AUTH_KIND_CLI_SNAPSHOT:
+                continue
+            details = self.registry.get_account(record.alias)
+            candidate = details.snapshot.oauth_account
+            candidate_email = str(candidate.get("emailAddress", "") or "")
+            candidate_org_id = str(candidate.get("organizationUuid", "") or "")
+            candidate_account_uuid = str(candidate.get("accountUuid", "") or "")
+            if candidate_email != snapshot_email:
+                continue
+            if snapshot_org_id and candidate_org_id != snapshot_org_id:
+                continue
+            if (
+                snapshot_account_uuid
+                and candidate_account_uuid
+                and candidate_account_uuid != snapshot_account_uuid
+            ):
+                continue
+            matches.append(record.alias)
+        return matches
+
+    @staticmethod
+    def _snapshot_changed(before: AuthSnapshot, after: AuthSnapshot) -> bool:
+        return (
+            before.oauth_account != after.oauth_account
+            or before.credentials != after.credentials
+        )
+
+    def _usage_for_alias(self, alias: str) -> dict[str, Any] | None:
+        details = self.registry.get_account(alias)
+        return self._usage_for_snapshot(details.snapshot, f"alias:{alias}")
+
+    def _sdk_candidate_available(self, row: dict[str, Any]) -> bool:
+        usage = row.get("usage")
+        if not isinstance(usage, dict) or usage.get("stale"):
+            return False
+        five_hour = self._window_payload(usage, "five_hour")
+        seven_day = self._window_payload(usage, "seven_day")
+        return (
+            not self._window_limit_reached(five_hour, self.SDK_FIVE_HOUR_LIMIT_PERCENT)
+            and not self._window_limit_reached(seven_day, self.SDK_SEVEN_DAY_LIMIT_PERCENT)
+        )
+
+    def _sdk_candidate_sort_key(self, row: dict[str, Any]) -> tuple[float, float, str]:
+        usage = row.get("usage")
+        five_hour_remaining = remaining_percentage(self._window_payload(usage, "five_hour")) or 0.0
+        seven_day_remaining = remaining_percentage(self._window_payload(usage, "seven_day")) or 0.0
+        return (five_hour_remaining, seven_day_remaining, str(row["alias"]))
+
+    @staticmethod
+    def _window_limit_reached(window: dict[str, Any] | None, limit: float) -> bool:
+        if not window:
+            return True
+        used = window.get("used_percentage")
+        if not isinstance(used, (int, float)):
+            return True
+        return float(used) >= limit
+
+    def _usage_for_snapshot(self, snapshot: AuthSnapshot, cache_key: str) -> dict[str, Any] | None:
+        resolved_key = cache_key if cache_key.startswith("alias:") else f"live:{cache_key}"
+        try:
+            return self.usage_provider.get_usage(snapshot, resolved_key)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _usage_cache_key_for_snapshot(snapshot: AuthSnapshot) -> str:
+        oauth = snapshot.oauth_account
+        return "|".join(
+            [
+                str(oauth.get("emailAddress", "") or ""),
+                str(oauth.get("organizationUuid", "") or ""),
+                str(oauth.get("accountUuid", "") or ""),
+            ]
+        )
+
+    @staticmethod
+    def _window_payload(
+        usage: dict[str, Any] | None,
+        window_name: str,
+    ) -> dict[str, Any] | None:
+        if not usage:
+            return None
+        window = usage.get(window_name)
+        return window if isinstance(window, dict) else None
+
+    def _format_window_remaining(self, usage: dict[str, Any] | None, window_name: str) -> str:
+        remaining = remaining_percentage(self._window_payload(usage, window_name))
+        if remaining is None:
+            return "unknown"
+        suffix = "~" if usage and usage.get("stale") else ""
+        return f"{remaining:.1f}%{suffix}"
+
+    def _format_window_reset(self, usage: dict[str, Any] | None, window_name: str) -> str:
+        reset = reset_countdown(self._window_payload(usage, window_name))
+        if usage and usage.get("stale") and reset != "unknown":
+            return f"{reset}~"
+        return reset
+
+    def _quota_payload(
+        self,
+        *,
+        alias: str | None,
+        email: str,
+        organization_name: str,
+        organization_id: str,
+        account_uuid: str,
+        status: str,
+        expires_at: int | None,
+        expires_in: str,
+        usage: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return {
+            "alias": alias,
+            "email": email,
+            "organization_name": organization_name,
+            "organization_id": organization_id,
+            "account_uuid": account_uuid,
+            "status": status,
+            "expires_at": expires_at,
+            "expires_in": expires_in,
+            "available": usage is not None,
+            "stale": bool(usage and usage.get("stale")),
+            "error": usage.get("error") if usage else "usage unavailable",
+            "five_hour": self._window_payload(usage, "five_hour"),
+            "seven_day": self._window_payload(usage, "seven_day"),
+            "seven_day_opus": self._window_payload(usage, "seven_day_opus"),
+            "extra_usage": usage.get("extra_usage") if usage else None,
+            "fetched_at": usage.get("fetched_at") if usage else None,
+            "quota_5h_left": self._format_window_remaining(usage, "five_hour"),
+            "quota_5h_reset": self._format_window_reset(usage, "five_hour"),
+            "quota_7d_left": self._format_window_remaining(usage, "seven_day"),
+            "quota_7d_reset": self._format_window_reset(usage, "seven_day"),
+        }
+
+    def _table_row(self, row: dict[str, Any], *, include_usage: bool) -> list[str]:
+        values = [
+            row["alias"],
+            self._display_auth_kind(str(row["auth_kind"])),
+            row["email"],
+            row["organization_name"] or "-",
+            row["status"],
+            row["expires_in"],
+            self._format_last_selected(row["last_selected_at"]),
+        ]
+        if include_usage:
+            values.extend(
+                [
+                    row["quota_5h_left"],
+                    row["quota_5h_reset"],
+                    row["quota_7d_left"],
+                    row["quota_7d_reset"],
+                ]
+            )
+        return [str(value) for value in values]
+
+    @staticmethod
+    def _status_from_expires_at(expires_at: int | None) -> str:
+        record = AccountRecord(
+            alias="",
+            auth_kind=AUTH_KIND_CLI_SNAPSHOT,
+            email="",
+            organization_name="",
+            organization_id="",
+            account_uuid="",
+            captured_at="",
+            expires_at=expires_at,
+            last_selected_at=None,
+            source="",
+        )
+        return record.status()
+
+    @staticmethod
+    def _format_expires_in(expires_at: int | None) -> str:
+        record = AccountRecord(
+            alias="",
+            auth_kind=AUTH_KIND_CLI_SNAPSHOT,
+            email="",
+            organization_name="",
+            organization_id="",
+            account_uuid="",
+            captured_at="",
+            expires_at=expires_at,
+            last_selected_at=None,
+            source="",
+        )
+        return record.expires_in()
 
     @staticmethod
     def _format_last_selected(value: str | None) -> str:
@@ -267,7 +799,27 @@ class AuthManager:
         days = hours // 24
         return f"{days}d ago"
 
+    @staticmethod
+    def _display_auth_kind(auth_kind: str) -> str:
+        if auth_kind == AUTH_KIND_CLI_SNAPSHOT:
+            return "cli"
+        if auth_kind == AUTH_KIND_TOKEN:
+            return "token"
+        return auth_kind
+
+    @staticmethod
+    def _one_year_expiry_epoch_ms() -> int:
+        return int((utc_now().timestamp() + 365 * 24 * 60 * 60) * 1000)
+
 
 def build_sdk_env(alias: str, base_env: dict[str, str] | None = None) -> dict[str, str]:
     """Convenience wrapper around AuthManager.build_sdk_env."""
     return AuthManager().build_sdk_env(alias, base_env=base_env)
+
+
+def build_sdk_env_auto(
+    preferred_alias: str | None = None,
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Convenience wrapper around AuthManager.build_sdk_env_auto."""
+    return AuthManager().build_sdk_env_auto(preferred_alias=preferred_alias, base_env=base_env)

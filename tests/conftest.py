@@ -7,6 +7,7 @@ import pytest
 from claude_select.live_state import ClaudeAuthBackend
 from claude_select.models import AuthSnapshot
 from claude_select.store import AuthRegistry
+from claude_select.usage import UsageProvider
 
 
 @pytest.fixture
@@ -47,6 +48,35 @@ class FakeAuthBackend(ClaudeAuthBackend):
         )
         self.snapshot = self.written_snapshot
 
+    def describe_targets(self) -> list[str]:
+        return [
+            "config: /fake/.claude.json",
+            "credentials store: fake-test-backend",
+        ]
+
+
+class FakeUsageProvider(UsageProvider):
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def get_usage(self, snapshot: AuthSnapshot, cache_key: str):
+        self.calls.append(cache_key)
+        return {
+            "five_hour": {
+                "used_percentage": 24.0,
+                "resets_at": "2099-01-01T05:00:00Z",
+            },
+            "seven_day": {
+                "used_percentage": 41.0,
+                "resets_at": "2099-01-07T00:00:00Z",
+            },
+            "seven_day_opus": None,
+            "extra_usage": None,
+            "fetched_at": "2099-01-01T00:00:00Z",
+            "stale": False,
+            "error": None,
+        }
+
 
 @pytest.fixture
 def registry(tmp_path) -> AuthRegistry:
@@ -56,3 +86,8 @@ def registry(tmp_path) -> AuthRegistry:
 @pytest.fixture
 def fake_auth_backend(sample_snapshot) -> FakeAuthBackend:
     return FakeAuthBackend(sample_snapshot)
+
+
+@pytest.fixture
+def fake_usage_provider() -> FakeUsageProvider:
+    return FakeUsageProvider()

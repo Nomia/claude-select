@@ -21,9 +21,17 @@ class AccountSelectionError(ClaudeSelectError):
     """Raised when account selection input is invalid."""
 
 
+class AccountKindError(ClaudeSelectError):
+    """Raised when an operation is unsupported for a given auth kind."""
+
+
 class AuthExpiredError(ClaudeSelectError):
     """Raised when a requested account is already expired."""
 
 
 class LockTimeoutError(ClaudeSelectError):
     """Raised when the registry lock cannot be acquired."""
+
+
+class UsageUnavailableError(ClaudeSelectError):
+    """Raised when quota usage data cannot be fetched or parsed."""

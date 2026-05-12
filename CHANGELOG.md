@@ -6,6 +6,21 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-12
+
+### Added
+
+- Added quota-aware SDK token orchestration with `pick_sdk_account()` and `build_sdk_env_auto()`.
+- Added support for long-lived SDK/program tokens through `add-token` and the `init` token setup phase.
+- Added current live-state sync flows through `sync-current`, plus automatic light sync in `list`, `whoami`, and periodic sync in `watch`.
+- Added a generated overview architecture image and refreshed English/Chinese README diagrams and examples.
+
+### Changed
+
+- Split registry entries into `cli` and `token` kinds so CLI selection and SDK token usage have separate lifecycle rules.
+- Expanded CLI feedback after capture/update to show status, expiry, and the current registry state.
+- Enriched `list`, `watch`, `whoami`, and Python SDK quota APIs with current usage and selection context.
+
 ## [0.2.1] - 2026-05-11
 
 ### Changed

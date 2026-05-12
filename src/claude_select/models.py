@@ -13,6 +13,9 @@ STATUS_EXPIRING_SOON = "expiring_soon"
 STATUS_EXPIRED = "expired"
 STATUS_UNKNOWN = "unknown"
 
+AUTH_KIND_CLI_SNAPSHOT = "cli_snapshot"
+AUTH_KIND_TOKEN = "token"
+
 
 def utc_now() -> datetime:
     """Return the current UTC datetime."""
@@ -86,6 +89,7 @@ class AccountRecord:
     """Account metadata stored in the registry database."""
 
     alias: str
+    auth_kind: str
     email: str
     organization_name: str
     organization_id: str

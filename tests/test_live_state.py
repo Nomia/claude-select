@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -74,6 +75,9 @@ def test_auth_backend_write_snapshot(tmp_path):
     assert backend.read_snapshot().oauth_account["emailAddress"] == "next@example.com"
     assert json.loads(config_path.read_text(encoding="utf-8"))["theme"] == "dark"
     assert (tmp_path / "backups" / ".claude.json").exists()
+    targets = backend.describe_targets()
+    assert str(config_path) in targets[0]
+    assert str(credentials_path) in targets[1]
 
 
 def test_auth_backend_rejects_invalid_config(tmp_path):
@@ -139,3 +143,15 @@ def test_macos_keychain_store(monkeypatch):
 
     assert calls[0][:2] == ["security", "find-generic-password"]
     assert calls[1][:2] == ["security", "add-generic-password"]
+
+
+def test_auth_backend_describe_targets_keychain():
+    backend = ClaudeAuthBackend(
+        config_path=Path("/tmp/.claude.json"),
+        credential_store=MacOSKeychainCredentialStore(account_name="tester"),
+    )
+
+    targets = backend.describe_targets()
+
+    assert targets[0] == "config: /tmp/.claude.json"
+    assert "macOS Keychain" in targets[1]
