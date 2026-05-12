@@ -44,7 +44,12 @@ class AuthRegistry:
                         last_selected_at TEXT,
                         source TEXT NOT NULL,
                         oauth_account_json TEXT NOT NULL,
-                        credentials_json TEXT NOT NULL
+                        credentials_json TEXT NOT NULL,
+                        last_synced_at TEXT,
+                        sdk_token_captured_at TEXT,
+                        sdk_token_expires_at INTEGER,
+                        sdk_token_oauth_account_json TEXT,
+                        sdk_token_credentials_json TEXT
                     )
                     """
             )
@@ -55,6 +60,20 @@ class AuthRegistry:
             if "auth_kind" not in columns:
                 connection.execute(
                     "ALTER TABLE accounts ADD COLUMN auth_kind TEXT NOT NULL DEFAULT 'cli_snapshot'"
+                )
+            if "last_synced_at" not in columns:
+                connection.execute("ALTER TABLE accounts ADD COLUMN last_synced_at TEXT")
+            if "sdk_token_captured_at" not in columns:
+                connection.execute("ALTER TABLE accounts ADD COLUMN sdk_token_captured_at TEXT")
+            if "sdk_token_expires_at" not in columns:
+                connection.execute("ALTER TABLE accounts ADD COLUMN sdk_token_expires_at INTEGER")
+            if "sdk_token_oauth_account_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE accounts ADD COLUMN sdk_token_oauth_account_json TEXT"
+                )
+            if "sdk_token_credentials_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE accounts ADD COLUMN sdk_token_credentials_json TEXT"
                 )
             connection.execute(
                 """
@@ -88,6 +107,7 @@ class AuthRegistry:
         last_selected_at: str | None,
         source: str,
         snapshot: AuthSnapshot,
+        last_synced_at: str | None = None,
     ) -> None:
         """Create or update an account snapshot."""
         self.initialize()
@@ -97,8 +117,8 @@ class AuthRegistry:
                     INSERT INTO accounts (
                         alias, auth_kind, email, organization_name, organization_id,
                         account_uuid, captured_at, expires_at, last_selected_at,
-                        source, oauth_account_json, credentials_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source, oauth_account_json, credentials_json, last_synced_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(alias) DO UPDATE SET
                         auth_kind=excluded.auth_kind,
                         email=excluded.email,
@@ -110,7 +130,8 @@ class AuthRegistry:
                         last_selected_at=excluded.last_selected_at,
                         source=excluded.source,
                         oauth_account_json=excluded.oauth_account_json,
-                        credentials_json=excluded.credentials_json
+                        credentials_json=excluded.credentials_json,
+                        last_synced_at=excluded.last_synced_at
                     """,
                 (
                     alias,
@@ -125,8 +146,42 @@ class AuthRegistry:
                     source,
                     json.dumps(snapshot.oauth_account, sort_keys=True),
                     json.dumps(snapshot.credentials, sort_keys=True),
+                    last_synced_at,
                 ),
             )
+
+    def attach_sdk_token(
+        self,
+        *,
+        alias: str,
+        captured_at: str,
+        expires_at: int | None,
+        snapshot: AuthSnapshot,
+    ) -> None:
+        """Attach or replace one SDK token for an existing alias."""
+        self.initialize()
+        with self.lock(), self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE accounts
+                SET sdk_token_captured_at = ?,
+                    sdk_token_expires_at = ?,
+                    sdk_token_oauth_account_json = ?,
+                    sdk_token_credentials_json = ?,
+                    last_synced_at = ?
+                WHERE alias = ?
+                """,
+                (
+                    captured_at,
+                    expires_at,
+                    json.dumps(snapshot.oauth_account, sort_keys=True),
+                    json.dumps(snapshot.credentials, sort_keys=True),
+                    captured_at,
+                    alias,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise AccountNotFoundError(f"Account '{alias}' was not found.")
 
     def list_accounts(self) -> list[AccountRecord]:
         """Return all registered accounts sorted by alias."""
@@ -135,7 +190,8 @@ class AuthRegistry:
             cursor = connection.execute(
                 """
                 SELECT alias, email, organization_name, organization_id, account_uuid,
-                       captured_at, expires_at, last_selected_at, source, auth_kind
+                       captured_at, expires_at, last_selected_at, source, last_synced_at,
+                       auth_kind, sdk_token_credentials_json
                 FROM accounts
                 ORDER BY alias
                 """
@@ -149,8 +205,10 @@ class AuthRegistry:
             cursor = connection.execute(
                 """
                 SELECT alias, email, organization_name, organization_id, account_uuid,
-                       captured_at, expires_at, last_selected_at, source, auth_kind,
-                       oauth_account_json, credentials_json
+                       captured_at, expires_at, last_selected_at, source, last_synced_at,
+                       auth_kind, sdk_token_credentials_json,
+                       oauth_account_json, credentials_json,
+                       sdk_token_oauth_account_json
                 FROM accounts
                 WHERE alias = ?
                 """,
@@ -159,12 +217,22 @@ class AuthRegistry:
             row = cursor.fetchone()
         if row is None:
             raise AccountNotFoundError(f"Account '{alias}' was not found.")
-        record = self._row_to_record(row[:10])
+        record = self._row_to_record(row[:12])
         snapshot = AuthSnapshot(
-            oauth_account=json.loads(row[10]),
-            credentials=json.loads(row[11]),
+            oauth_account=json.loads(row[12]),
+            credentials=json.loads(row[13]),
         )
-        return AccountDetails(record=record, snapshot=snapshot)
+        sdk_token_snapshot = None
+        if row[11] and row[14]:
+            sdk_token_snapshot = AuthSnapshot(
+                oauth_account=json.loads(row[14]),
+                credentials=json.loads(row[11]),
+            )
+        return AccountDetails(
+            record=record,
+            snapshot=snapshot,
+            sdk_token_snapshot=sdk_token_snapshot,
+        )
 
     def remove_account(self, alias: str) -> None:
         """Delete an account from the registry."""
@@ -262,7 +330,7 @@ class AuthRegistry:
     def _row_to_record(row: tuple[object, ...]) -> AccountRecord:
         return AccountRecord(
             alias=str(row[0]),
-            auth_kind=str(row[9] if row[9] is not None else "cli_snapshot"),
+            auth_kind=str(row[10] if row[10] is not None else "cli_snapshot"),
             email=str(row[1]),
             organization_name=str(row[2]),
             organization_id=str(row[3]),
@@ -271,4 +339,6 @@ class AuthRegistry:
             expires_at=row[6] if isinstance(row[6], int) else None,
             last_selected_at=str(row[7]) if row[7] is not None else None,
             source=str(row[8]),
+            last_synced_at=str(row[9]) if row[9] is not None else None,
+            has_sdk_token=row[11] is not None,
         )

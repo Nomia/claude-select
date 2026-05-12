@@ -322,7 +322,7 @@ def test_build_panels_for_empty_and_error_state(
     )
 
     panel = cli._build_current_account_panel(manager)
-    table_or_panel = cli._build_accounts_table(manager)
+    table_or_panel = cli._build_accounts_table(manager, include_usage=True)
 
     assert "bad live state" in str(panel.renderable)
     assert "No accounts have been captured yet." in str(table_or_panel.renderable)
@@ -360,11 +360,38 @@ def test_cli_watch_and_interactive_select(
     output = capsys.readouterr().out
     assert "Current Claude live account" in output
     assert "matched alias: work" in output
-    assert "76.0%" in output
+    assert "auth method: claude.ai" in output
+    assert "subscription: team" in output
     assert "Alias" in output
     assert "Organization" in output
+    assert "Last Synced" in output
     assert "Selected work <work@example.com> [Example Org]." in output
     assert "Updated Claude live auth state:" in output
+
+
+def test_cli_watch_usage_flag(
+    monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    monkeypatch.setattr(cli, "AuthManager", lambda: manager)
+
+    assert cli.main(["watch", "--usage", "--iterations", "1", "--interval", "1"]) == 0
+
+    table = cli._build_accounts_table(manager, include_usage=True)
+    output = capsys.readouterr().out
+    assert "Current Claude live account" in output
+    assert "auth method: claude.ai" in output
+    assert [column.header for column in table.columns][-4:] == [
+        "5h Left",
+        "5h Reset",
+        "7d Left",
+        "7d Reset",
+    ]
 
 
 def test_cli_sync_current(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
@@ -417,6 +444,24 @@ def test_cli_version(capsys):
     output = capsys.readouterr().out
     assert output.startswith("claude-select ")
 
+    try:
+        cli.main(["-V"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    output = capsys.readouterr().out
+    assert output.startswith("claude-select ")
+
+
+def test_cli_version_subcommand(capsys):
+    assert cli.main(["version"]) == 0
+    assert cli.main(["v"]) == 0
+
+    output = capsys.readouterr().out
+    lines = [line for line in output.splitlines() if line.strip()]
+    assert len(lines) == 2
+    assert all(line.startswith("claude-select ") for line in lines)
+
 
 def test_cli_whoami(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
@@ -432,12 +477,36 @@ def test_cli_whoami(monkeypatch, capsys, registry, fake_auth_backend, fake_usage
     output = capsys.readouterr().out
     assert "Current Claude live account" in output
     assert "matched alias: work" in output
+    assert "auth method: claude.ai" in output
     assert manager.get_account("work").record.expires_at == 4102448400000
 
     assert cli.main(["whoami", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["matched_alias"] == "work"
     assert payload["quota_5h_left"] == "76.0%"
+    assert payload["auth_method"] == "claude.ai"
+
+
+def test_cli_command_aliases(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    monkeypatch.setattr(cli, "AuthManager", lambda: manager)
+
+    assert cli.main(["ls"]) == 0
+    assert cli.main(["use", "work"]) == 0
+    assert cli.main(["cur"]) == 0
+    assert cli.main(["sync"]) == 0
+    assert cli.main(["rm", "work"]) == 0
+
+    output = capsys.readouterr().out
+    assert "work@example.com" in output
+    assert "Selected work <work@example.com> [Example Org]." in output
+    assert "work" in output
+    assert "Removed work." in output
 
 
 def test_cli_sync_current_json(
@@ -489,10 +558,10 @@ def test_wait_for_login_and_choose_alias_edge_cases(
     with pytest.raises(ClaudeSelectError):
         manager.choose_alias_interactively()
 
-    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
     monkeypatch.setattr("builtins.input", lambda _prompt="": "")
     manager.wait_for_login(True)
     manager.wait_for_login(False)
+    assert fake_auth_backend.login_attempts == 1
 
     manager.add_token_account("work-sdk", "token", email="sdk@example.com")
     monkeypatch.setattr("builtins.input", lambda _prompt="": "work-sdk")
@@ -500,8 +569,8 @@ def test_wait_for_login_and_choose_alias_edge_cases(
         manager.choose_alias_interactively()
 
     text = capsys.readouterr().out
-    assert "`claude` was not found in PATH." in text
-    assert "Run `claude` in another shell" in text
+    assert "Launching `claude auth login` in this terminal." in text
+    assert "Run `claude auth login` in another shell" in text
 
 
 def test_cli_export_env_plain_and_setup_token_guidance(monkeypatch, capsys):

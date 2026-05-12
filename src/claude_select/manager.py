@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
-import subprocess
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -84,6 +82,8 @@ class AuthManager:
             payload = asdict(record)
             payload["status"] = record.status(now)
             payload["expires_in"] = record.expires_in(now)
+            payload["kind_label"] = self._kind_label(record)
+            payload["display_name"] = self.format_account_label(payload)
             if include_usage:
                 if record.auth_kind == AUTH_KIND_TOKEN:
                     payload["usage"] = None
@@ -127,12 +127,8 @@ class AuthManager:
         account_uuid: str = "",
         overwrite: bool = True,
     ) -> dict[str, Any]:
-        """Store a long-lived setup-token entry for SDK/program usage."""
+        """Store or attach a long-lived setup-token entry for SDK/program usage."""
         normalized = self._normalize_alias(alias)
-        if not overwrite:
-            existing_aliases = {record.alias for record in self.registry.list_accounts()}
-            if normalized in existing_aliases:
-                raise AccountExistsError(f"Account '{normalized}' already exists.")
         normalized_email = email.strip()
         if not normalized_email:
             raise AccountSelectionError("Email cannot be empty for token entries.")
@@ -143,12 +139,35 @@ class AuthManager:
             organization_id=organization_id.strip(),
             account_uuid=account_uuid.strip(),
         )
-        record = self._upsert_snapshot(
-            normalized,
-            snapshot,
-            auth_kind=AUTH_KIND_TOKEN,
-            expires_at_override=self._one_year_expiry_epoch_ms(),
-        )
+        expires_at = self._one_year_expiry_epoch_ms()
+        try:
+            existing = self.registry.get_account(normalized)
+        except AccountNotFoundError:
+            existing = None
+        if existing is None:
+            record = self._upsert_snapshot(
+                normalized,
+                snapshot,
+                auth_kind=AUTH_KIND_TOKEN,
+                expires_at_override=expires_at,
+            )
+        elif existing.record.auth_kind == AUTH_KIND_CLI_SNAPSHOT:
+            self.registry.attach_sdk_token(
+                alias=normalized,
+                captured_at=utc_now_iso(),
+                expires_at=expires_at,
+                snapshot=snapshot,
+            )
+            record = self.registry.get_account(normalized).record
+        else:
+            if not overwrite:
+                raise AccountExistsError(f"Account '{normalized}' already exists.")
+            record = self._upsert_snapshot(
+                normalized,
+                snapshot,
+                auth_kind=AUTH_KIND_TOKEN,
+                expires_at_override=expires_at,
+            )
         return self._record_payload(record)
 
     def resolve_token_metadata(self, token: str) -> dict[str, str]:
@@ -297,19 +316,18 @@ class AuthManager:
         exported for SDK consumption.
         """
         details = self.registry.get_account(self._normalize_alias(alias))
-        if (
-            details.record.auth_kind == AUTH_KIND_CLI_SNAPSHOT
-            and details.record.status() == STATUS_EXPIRED
-        ):
+        sdk_snapshot = self._sdk_snapshot_for_details(details)
+        if sdk_snapshot is None and details.record.status() == STATUS_EXPIRED:
             raise AuthExpiredError(
                 f"Account '{details.record.alias}' is expired. Run relogin before using it."
             )
         env = dict(base_env if base_env is not None else os.environ)
         for key in CONFLICTING_AUTH_ENV_VARS:
             env.pop(key, None)
-        oauth = details.snapshot.credentials["claudeAiOauth"]
+        effective_snapshot = sdk_snapshot or details.snapshot
+        oauth = effective_snapshot.credentials["claudeAiOauth"]
         env["CLAUDE_CODE_OAUTH_TOKEN"] = str(oauth["accessToken"])
-        scopes = details.snapshot.scopes()
+        scopes = effective_snapshot.scopes()
         if scopes:
             env["CLAUDE_CODE_OAUTH_SCOPES"] = " ".join(scopes)
         return env
@@ -340,20 +358,19 @@ class AuthManager:
     def export_sdk_auth(self, alias: str) -> dict[str, Any]:
         """Return a structured auth payload for SDK consumers."""
         details = self.registry.get_account(self._normalize_alias(alias))
-        if (
-            details.record.auth_kind == AUTH_KIND_CLI_SNAPSHOT
-            and details.record.status() == STATUS_EXPIRED
-        ):
+        sdk_snapshot = self._sdk_snapshot_for_details(details)
+        if sdk_snapshot is None and details.record.status() == STATUS_EXPIRED:
             raise AuthExpiredError(
                 f"Account '{details.record.alias}' is expired. Run relogin before using it."
             )
+        effective_snapshot = sdk_snapshot or details.snapshot
         return {
             "alias": details.record.alias,
             "email": details.record.email,
             "status": details.record.status(),
             "expires_at": details.record.expires_at,
-            "oauth_account": details.snapshot.oauth_account,
-            "credentials": details.snapshot.credentials,
+            "oauth_account": effective_snapshot.oauth_account,
+            "credentials": effective_snapshot.credentials,
         }
 
     def current_alias(self) -> str | None:
@@ -376,6 +393,13 @@ class AuthManager:
             "expires_in": self._format_expires_in(expires_at),
             "targets": self.auth_backend.describe_targets(),
         }
+        auth_status = self.auth_backend.read_auth_status()
+        payload["auth_status"] = auth_status
+        if isinstance(auth_status, dict):
+            payload["logged_in"] = auth_status.get("loggedIn")
+            payload["auth_method"] = auth_status.get("authMethod")
+            payload["api_provider"] = auth_status.get("apiProvider")
+            payload["subscription_type"] = auth_status.get("subscriptionType")
         usage = self._usage_for_snapshot(
             snapshot,
             payload["matched_alias"] or self._usage_cache_key_for_snapshot(snapshot),
@@ -448,6 +472,7 @@ class AuthManager:
             "Status",
             "Expires In",
             "Last Selected",
+            "Last Synced",
         ]
         if include_usage:
             headers.extend(["5h Left", "5h Reset", "7d Left", "7d Reset"])
@@ -477,6 +502,12 @@ class AuthManager:
         lines.append(f"  email: {current['email'] or '-'}")
         lines.append(f"  organization: {current['organization_name'] or '-'}")
         lines.append(f"  expires in: {current['expires_in']}")
+        auth_method = current.get("auth_method")
+        if auth_method:
+            lines.append(f"  auth method: {auth_method}")
+        subscription_type = current.get("subscription_type")
+        if subscription_type:
+            lines.append(f"  subscription: {subscription_type}")
         lines.append(f"  5h quota left: {current['quota_5h_left']}")
         lines.append(f"  5h resets in: {current['quota_5h_reset']}")
         lines.append(f"  7d quota left: {current['quota_7d_left']}")
@@ -488,17 +519,14 @@ class AuthManager:
     def wait_for_login(self, launch: bool) -> None:
         """Guide the user through logging in with the Claude CLI."""
         if launch:
-            claude_path = shutil.which("claude")
-            if claude_path:
-                print("Launching `claude` in this terminal.")
-                print("Inside Claude, run `/login` and finish account authorization.")
-                print("When login is complete, exit Claude to return here.")
-                subprocess.run([claude_path], check=False)
+            if self.auth_backend.run_auth_login():
+                print("Launching `claude auth login` in this terminal.")
+                print("Complete account authorization, then return here.")
             else:
                 print("`claude` was not found in PATH.")
-                print("Run `claude`, complete `/login`, then return here.")
+                print("Run `claude auth login`, complete authorization, then return here.")
         else:
-            print("Run `claude` in another shell, complete `/login`, then return here.")
+            print("Run `claude auth login` in another shell, then return here.")
         input("Press Enter after login is complete...")
 
     def choose_alias_interactively(self) -> str:
@@ -550,6 +578,7 @@ class AuthManager:
             last_selected_at=existing_last_selected,
             source="claude_cli" if auth_kind == AUTH_KIND_CLI_SNAPSHOT else "claude_setup_token",
             snapshot=snapshot,
+            last_synced_at=captured_at,
         )
         return self.registry.get_account(alias).record
 
@@ -571,6 +600,7 @@ class AuthManager:
             last_selected_at=existing.last_selected_at,
             source=existing.source,
             snapshot=snapshot,
+            last_synced_at=utc_now_iso(),
         )
         return self.registry.get_account(alias).record
 
@@ -694,6 +724,7 @@ class AuthManager:
         payload = asdict(record)
         payload["status"] = record.status()
         payload["expires_in"] = record.expires_in()
+        payload["kind_label"] = self._kind_label(record)
         payload["display_name"] = self.format_account_label(payload)
         return payload
 
@@ -702,15 +733,15 @@ class AuthManager:
         """Return a compact human-readable label with alias, email, and org."""
         if isinstance(account, AccountRecord):
             alias = account.alias
-            auth_kind = account.auth_kind
+            auth_kind = AuthManager._kind_label(account)
             email = account.email
             organization_name = account.organization_name
         else:
             alias = str(account["alias"])
-            auth_kind = str(account.get("auth_kind", "") or "")
+            auth_kind = str(account.get("kind_label") or account.get("auth_kind", "") or "")
             email = str(account["email"])
             organization_name = str(account.get("organization_name", "") or "")
-        kind_prefix = "[token] " if auth_kind == AUTH_KIND_TOKEN else ""
+        kind_prefix = "[token] " if auth_kind == "token" else ""
         if organization_name:
             return f"{kind_prefix}{alias} <{email}> [{organization_name}]"
         return f"{kind_prefix}{alias} <{email}>"
@@ -889,12 +920,13 @@ class AuthManager:
     def _table_row(self, row: dict[str, Any], *, include_usage: bool) -> list[str]:
         values = [
             row["alias"],
-            self._display_auth_kind(str(row["auth_kind"])),
+            self._display_auth_kind(str(row.get("kind_label") or row["auth_kind"])),
             row["email"],
             row["organization_name"] or "-",
             row["status"],
             row["expires_in"],
             self._format_last_selected(row["last_selected_at"]),
+            self._format_last_selected(row["last_synced_at"]),
         ]
         if include_usage:
             values.extend(
@@ -961,11 +993,27 @@ class AuthManager:
 
     @staticmethod
     def _display_auth_kind(auth_kind: str) -> str:
+        if auth_kind == "cli+token":
+            return "cli+token"
         if auth_kind == AUTH_KIND_CLI_SNAPSHOT:
             return "cli"
         if auth_kind == AUTH_KIND_TOKEN:
             return "token"
         return auth_kind
+
+    @staticmethod
+    def _kind_label(record: AccountRecord) -> str:
+        if record.auth_kind == AUTH_KIND_CLI_SNAPSHOT and record.has_sdk_token:
+            return "cli+token"
+        return record.auth_kind
+
+    @staticmethod
+    def _sdk_snapshot_for_details(details: AccountDetails) -> AuthSnapshot | None:
+        if details.sdk_token_snapshot is not None:
+            return details.sdk_token_snapshot
+        if details.record.auth_kind == AUTH_KIND_TOKEN:
+            return details.snapshot
+        return None
 
     @staticmethod
     def _one_year_expiry_epoch_ms() -> int:

@@ -7,7 +7,7 @@
 
 There are two registry entry kinds:
 
-- `cli` entries: captured from Claude CLI `/login`; these support quota, watch, select, and sync flows
+- `cli` entries: captured from Claude CLI `auth login`; these support quota, watch, select, and sync flows
 - `token` entries: captured from `claude setup-token`; these are simple long-lived SDK credentials only
 
 Long-lived `token` entries are **not** used for quota-aware auto-selection, quota monitoring, or CLI account switching.
@@ -32,10 +32,10 @@ Or capture things one by one:
 
 ```bash
 claude-select add work
-claude-select add-token work-sdk
+claude-select add-token work
 ```
 
-`add-token` launches `claude setup-token`, tries to detect the token from the terminal output, and stores it as a simple SDK/program credential. Because official long-lived tokens are inference-only, profile metadata detection is best-effort and may fall back to manual prompts.
+`add-token` launches `claude setup-token`, tries to detect the token from the terminal output, and stores it as a simple SDK/program credential. If the alias already exists as a CLI account, the token is attached to that alias instead of replacing the CLI snapshot. Because official long-lived tokens are inference-only, profile metadata detection is best-effort and may fall back to manual prompts.
 
 ## Minimal usage
 
@@ -52,13 +52,14 @@ async for message in query(prompt="summarize this repository", options=options):
     print(message)
 ```
 
-To use a long-lived token entry explicitly:
+If a CLI alias has an attached long-lived token, `build_sdk_env("work")` will prefer
+that token automatically. You can also keep standalone token-only aliases if you want:
 
 ```python
 from claude_select import AuthManager
 
 manager = AuthManager()
-env = manager.build_sdk_env("work-sdk")
+env = manager.build_sdk_env("work")
 ```
 
 ## What `build_sdk_env()` returns
@@ -76,7 +77,9 @@ It also removes conflicting auth variables such as:
 - `CLAUDE_CODE_USE_VERTEX`
 - `CLAUDE_CODE_USE_FOUNDRY`
 
-This keeps one Python call bound to one stored account or token entry.
+This keeps one Python call bound to one stored account entry. When an alias has both a
+CLI snapshot and an attached token, the token is used for SDK env export and the CLI
+snapshot remains available for quota, watch, select, and sync flows.
 
 ## Common patterns
 
@@ -171,6 +174,6 @@ Use `claude-select` like this:
 
 - CLI users: `claude-select select work`
 - Python users with login snapshots: `AuthManager().build_sdk_env("work")`
-- Python users with long-lived tokens: `AuthManager().build_sdk_env("work-sdk")`
+- Python users with a long-lived token attached to a CLI alias: `AuthManager().build_sdk_env("work")`
 
 Both flows share the same local registry, but only CLI selection mutates Claude's active live auth state.

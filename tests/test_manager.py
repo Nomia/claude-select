@@ -82,6 +82,34 @@ def test_add_token_account_and_build_sdk_env(registry, fake_auth_backend, fake_u
     assert env["PATH"] == "/bin"
 
 
+def test_add_token_account_attaches_to_existing_cli_alias(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+
+    captured = manager.add_token_account(
+        "work",
+        "long-lived-token",
+        email="work@example.com",
+        organization_name="Example Org",
+    )
+    details = manager.get_account("work")
+    env = manager.build_sdk_env("work", base_env={"PATH": "/bin"})
+
+    assert captured["auth_kind"] == "cli_snapshot"
+    assert captured["kind_label"] == "cli+token"
+    assert details.record.auth_kind == "cli_snapshot"
+    assert details.record.has_sdk_token is True
+    assert details.sdk_token_snapshot is not None
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "long-lived-token"
+    assert env["PATH"] == "/bin"
+
+
 def test_resolve_token_metadata(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
@@ -485,6 +513,7 @@ def test_render_table_and_current_alias(registry, fake_auth_backend, fake_usage_
     assert "Kind" in rendered
     assert "work@example.com" in rendered
     assert "76.0%" in rendered
+    assert "Last Synced" in rendered
     assert manager.current_alias() == "work"
 
 
@@ -539,6 +568,29 @@ def test_token_entries_show_na_usage(registry, fake_auth_backend, fake_usage_pro
     assert quota["available"] is False
     assert quota["quota_5h_left"] == "n/a"
     assert "unsupported" in quota["error"]
+
+
+def test_cli_entry_with_sdk_token_keeps_cli_quota(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    manager.add_token_account("work", "token-a", email="work@example.com")
+
+    rows = manager.list_accounts(include_usage=True)
+    quota = manager.get_account_quota("work")
+
+    assert rows[0]["kind_label"] == "cli+token"
+    assert rows[0]["quota_5h_left"] == "76.0%"
+    assert rows[0]["last_synced_at"] is not None
+    assert quota["available"] is True
+    assert quota["quota_5h_left"] == "76.0%"
+
+
+def test_display_auth_kind_unknown_passthrough():
+    assert AuthManager._display_auth_kind("custom") == "custom"
 
 
 def test_get_live_quota(registry, fake_auth_backend, fake_usage_provider):
@@ -608,6 +660,7 @@ def test_sync_current_account_updates_registry(registry, fake_auth_backend, fake
     assert payload["updated"] is True
     assert refreshed.snapshot.credentials["claudeAiOauth"]["accessToken"] == "access-2"
     assert refreshed.record.expires_at == 4102448400000
+    assert refreshed.record.last_synced_at is not None
 
 
 def test_sync_current_account_unchanged(registry, fake_auth_backend, fake_usage_provider):

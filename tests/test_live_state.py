@@ -155,3 +155,44 @@ def test_auth_backend_describe_targets_keychain():
 
     assert targets[0] == "config: /tmp/.claude.json"
     assert "macOS Keychain" in targets[1]
+
+
+def test_auth_backend_run_auth_login(monkeypatch):
+    calls: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda command, **_kwargs: calls.append(command) or Result(),
+    )
+
+    backend = ClaudeAuthBackend()
+
+    assert backend.run_auth_login() is True
+    assert calls == [["/usr/local/bin/claude", "auth", "login"]]
+
+
+def test_auth_backend_read_auth_status(monkeypatch):
+    class Result:
+        stdout = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: Result())
+
+    backend = ClaudeAuthBackend()
+
+    assert backend.read_auth_status() == {
+        "loggedIn": True,
+        "authMethod": "claude.ai",
+    }
+
+
+def test_auth_backend_read_auth_status_falls_back(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    backend = ClaudeAuthBackend()
+
+    assert backend.read_auth_status() is None

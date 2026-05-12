@@ -12,7 +12,7 @@
 
 It stores two entry kinds:
 
-- `cli` entries: captured from Claude CLI `/login`; these support `watch`, `list --usage`, `whoami`, `select`, `sync-current`, and `relogin`
+- `cli` entries: captured from Claude CLI `auth login`; these support `watch`, `list --usage`, `whoami`, `select`, `sync-current`, and `relogin`
 - `token` entries: captured from `claude setup-token`; these are simple long-lived SDK credentials for Python/program use
 
 Long-lived `token` entries do **not** participate in quota monitoring, quota-aware auto-selection, or CLI account switching.
@@ -33,14 +33,14 @@ Run the guided bootstrap:
 claude-select init
 ```
 
-By default, `claude-select` launches `claude` in the current terminal for each account capture.
+By default, `claude-select` launches `claude auth login` in the current terminal for each account capture.
 
 For each account:
 
 1. choose an alias such as `work` or `personal`
-2. `claude-select` launches `claude`
-3. inside the `claude` CLI session, run `/login` and finish authorization
-4. exit `claude` and return to `claude-select`
+2. `claude-select` launches `claude auth login`
+3. finish authorization
+4. return to `claude-select`
 5. press Enter so `claude-select` can capture the current login snapshot
 6. look for a success block that confirms the account was saved and shows the current registry
 
@@ -62,30 +62,32 @@ claude-select add work --no-launch
 ```bash
 $ claude-select init
 Claude account bootstrap
-Add accounts one by one. Complete /login for each account before capture.
+Add accounts one by one. Complete `claude auth login` for each account before capture.
 
 Alias (blank to finish): work
-Launching `claude` in this terminal.
-Inside Claude, run `/login` and finish account authorization.
-When login is complete, exit Claude to return here.
+Launching `claude auth login` in this terminal.
+`claude auth login` will be launched in this terminal.
+When login is complete, return here.
 Press Enter after login is complete...
 Captured work <a@company.com> [Team A].
 Status: healthy
 Expires in: 7h 57m
 
 Current registry:
-Alias  Kind  Email            Organization  Status   Expires In  Last Selected
------  ----  ---------------  ------------  -------  ----------  -------------
-work   cli   a@company.com    Team A        healthy  7h 57m      -
+Alias  Kind  Email            Organization  Status   Expires In  Last Selected  Last Synced
+-----  ----  ---------------  ------------  -------  ----------  -------------  -----------
+work   cli   a@company.com    Team A        healthy  7h 57m      -              just now
 Add another account? [Y/n] y
 ```
 
 ### 2. Optionally add a long-lived SDK token
 
-You can store a `claude setup-token` token for explicit Python usage:
+You can store a `claude setup-token` token for explicit Python usage. If the alias
+already exists as a CLI account, the token is attached to that alias and the row
+will appear as `cli+token` in the registry:
 
 ```bash
-claude-select add-token work-sdk
+claude-select add-token work
 ```
 
 `add-token` launches `claude setup-token`, tries to detect the token from terminal output, then stores it as a simple SDK credential. Because these official long-lived tokens are inference-only, profile metadata detection is best-effort and may fall back to manual prompts.
@@ -93,7 +95,7 @@ claude-select add-token work-sdk
 ### What `add-token` looks like
 
 ```bash
-$ claude-select add-token work-sdk
+$ claude-select add-token work
 Launching `claude setup-token` in this terminal.
 Complete authorization. When the token is printed, copy it and return here.
 Detected the long-lived token from setup-token output.
@@ -101,15 +103,14 @@ Validated token for SDK/program use.
 Profile metadata is unavailable for this token scope.
 Email: a@company.com
 Organization (optional): Team A
-Captured [token] work-sdk <a@company.com> [Team A].
+Captured work <a@company.com> [Team A].
 Status: healthy
 Expires in: 364d
 
 Current registry:
-Alias     Kind   Email            Organization  Status   Expires In  Last Selected
---------  -----  ---------------  ------------  -------  ----------  -------------
-work      cli    a@company.com    Team A        healthy  7h 57m      -
-work-sdk  token  a@company.com    Team A        healthy  364d        -
+Alias  Kind       Email            Organization  Status   Expires In  Last Selected  Last Synced
+-----  ---------  ---------------  ------------  -------  ----------  -------------  -----------
+work   cli+token  a@company.com    Team A        healthy  7h 57m      -              just now
 ```
 
 ### 3. See what is stored
@@ -119,16 +120,17 @@ claude-select list
 claude-select list --usage
 claude-select whoami
 claude-select watch
+claude-select watch --usage
 ```
 
 Example table:
 
 ```text
-Alias     Kind   Email             Organization    Status          Expires In  Last Selected
---------  -----  ----------------  --------------  --------------  ----------  -------------
-personal  cli    a@example.com     Personal        healthy         18h 12m     2h ago
-work      cli    b@company.com     Team A          expiring_soon   1h 05m      -
-work-sdk  token  b@company.com     Team A          healthy         364d        -
+Alias     Kind   Email             Organization    Status          Expires In  Last Selected  Last Synced
+--------  -----  ----------------  --------------  --------------  ----------  -------------  -----------
+personal  cli    a@example.com     Personal        healthy         18h 12m     2h ago         15m ago
+work      cli    b@company.com     Team A          expiring_soon   1h 05m      -              6m ago
+work-sdk  token  b@company.com     Team A          healthy         364d        -              just now
 ```
 
 With `--usage`, `cli` entries show 5h/7d quota data and `token` entries show `n/a` because inference-only tokens do not expose quota/profile endpoints.
@@ -199,18 +201,19 @@ claude-select whoami
 Command behavior:
 
 - `init`: guided multi-account bootstrap for CLI accounts, then optional token capture phase
-- `add`: launch `claude` in the current terminal by default, then capture the current login into the registry
-- `add-token`: launch `claude setup-token` in the current terminal by default, then store a long-lived token for explicit SDK/program use
-- `relogin`: launch `claude` in the current terminal by default, then overwrite one stored CLI alias after the user logs in again
+- `add`: launch `claude auth login` in the current terminal by default, then capture the current login into the registry
+- `add-token`: launch `claude setup-token` in the current terminal by default, then store a long-lived token for explicit SDK/program use; if the alias already exists as a CLI account, the token is attached to that alias
+- `relogin`: launch `claude auth login` in the current terminal by default, then overwrite one stored CLI alias after the user logs in again
 - `list`: show the current registry table and do a light sync of the current live account first
 - `list --usage`: fetch and display 5h / 7d quota information for `cli` entries; `token` entries show `n/a`
-- `watch`: keep a live Rich-powered view of the current Claude live account plus the local registry and CLI quota data, with periodic live-state sync
+- `watch`: keep a live Rich-powered view of the current Claude live account plus the local registry, with periodic live-state sync
+- `watch --usage`: include 5h / 7d quota columns in the live registry table
 - `select`: write one stored `cli` snapshot back into Claude's live auth state
 - `sync-current`: read Claude's current live auth state and sync any refreshed token data back into the matching `cli` registry entry
 - `remove`: delete one stored entry
 - `export-env`: print SDK env vars for one alias
 - `current`: show the last alias selected for CLI use
-- `whoami`: show Claude's current live auth state, matched alias, and current quota summary after a light sync
+- `whoami`: show Claude's current live auth state, matched alias, auth method, subscription, and current quota summary after a light sync
 
 ## Python API 🐍
 

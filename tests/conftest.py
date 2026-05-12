@@ -34,6 +34,16 @@ class FakeAuthBackend(ClaudeAuthBackend):
     def __init__(self, snapshot: AuthSnapshot):
         self.snapshot = snapshot
         self.written_snapshot: AuthSnapshot | None = None
+        self.login_attempts = 0
+        self.auth_status_payload = {
+            "loggedIn": True,
+            "authMethod": "claude.ai",
+            "apiProvider": "firstParty",
+            "email": "work@example.com",
+            "orgId": "org-123",
+            "orgName": "Example Org",
+            "subscriptionType": "team",
+        }
 
     def read_snapshot(self) -> AuthSnapshot:
         return AuthSnapshot(
@@ -53,6 +63,13 @@ class FakeAuthBackend(ClaudeAuthBackend):
             "config: /fake/.claude.json",
             "credentials store: fake-test-backend",
         ]
+
+    def run_auth_login(self) -> bool:
+        self.login_attempts += 1
+        return True
+
+    def read_auth_status(self) -> dict[str, object] | None:
+        return copy.deepcopy(self.auth_status_payload)
 
 
 class FakeUsageProvider(UsageProvider):

@@ -7,7 +7,7 @@
 
 本地 registry 里有两类条目：
 
-- `cli` 条目：来自 Claude CLI `/login` 抓取；支持 quota、watch、select、sync 这些完整能力
+- `cli` 条目：来自 Claude CLI `auth login` 抓取；支持 quota、watch、select、sync 这些完整能力
 - `token` 条目：来自 `claude setup-token`；只作为简单的长期 SDK 凭证保存
 
 长期 `token` 条目**不参与** quota 自动选择、quota 监控或 CLI 切换。
@@ -32,10 +32,10 @@ claude-select init
 
 ```bash
 claude-select add work
-claude-select add-token work-sdk
+claude-select add-token work
 ```
 
-`add-token` 会启动 `claude setup-token`，尽量从终端输出里自动抓取 token，然后把它保存成一个简单的 SDK / 程序凭证。由于官方长期 token 是 inference-only，profile metadata 探测只是 best-effort，失败时会回退到人工输入。
+`add-token` 会启动 `claude setup-token`，尽量从终端输出里自动抓取 token，然后把它保存成一个简单的 SDK / 程序凭证。如果这个 alias 已经存在为 CLI 账号，长期 token 会挂到该 alias 上，而不是覆盖 CLI snapshot。由于官方长期 token 是 inference-only，profile metadata 探测只是 best-effort，失败时会回退到人工输入。
 
 ## 最小用法
 
@@ -52,13 +52,13 @@ async for message in query(prompt="summarize this repository", options=options):
     print(message)
 ```
 
-如果你要显式使用长期 token 条目：
+如果某个 CLI alias 挂了长期 token，`build_sdk_env("work")` 会自动优先使用这个 token。你也可以继续保留独立的 token-only alias：
 
 ```python
 from claude_select import AuthManager
 
 manager = AuthManager()
-env = manager.build_sdk_env("work-sdk")
+env = manager.build_sdk_env("work")
 ```
 
 ## `build_sdk_env()` 会返回什么
@@ -76,7 +76,7 @@ env = manager.build_sdk_env("work-sdk")
 - `CLAUDE_CODE_USE_VERTEX`
 - `CLAUDE_CODE_USE_FOUNDRY`
 
-这样可以保证一次 Python 调用只绑定一条明确的本地认证记录。
+这样可以保证一次 Python 调用只绑定一条明确的本地认证记录。如果某个 alias 同时有 CLI snapshot 和长期 token，SDK 导出会优先使用 token，而 CLI snapshot 仍然继续服务于 quota、watch、select 和 sync。
 
 ## 常见用法
 
@@ -171,6 +171,6 @@ claude-select relogin work
 
 - CLI 用户：`claude-select select work`
 - Python 用户如果用登录快照：`AuthManager().build_sdk_env("work")`
-- Python 用户如果用长期 token：`AuthManager().build_sdk_env("work-sdk")`
+- Python 用户如果把长期 token 挂在 CLI alias 上：`AuthManager().build_sdk_env("work")`
 
 两边共享同一份本地 registry，但只有 CLI 的 `select` 会改动 Claude 当前活跃的 live auth state。

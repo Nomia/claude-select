@@ -12,7 +12,7 @@
 
 它会保存两类条目：
 
-- `cli` 条目：来自 Claude CLI `/login` 抓取；支持 `watch`、`list --usage`、`whoami`、`select`、`sync-current`、`relogin`
+- `cli` 条目：来自 Claude CLI `auth login` 抓取；支持 `watch`、`list --usage`、`whoami`、`select`、`sync-current`、`relogin`
 - `token` 条目：来自 `claude setup-token`；只作为简单的长期 SDK 凭证保存，给 Python / 程序显式使用
 
 长期 `token` 条目**不参与** quota 监控、按 quota 自动选择或 CLI 切换。
@@ -33,14 +33,14 @@ pip install claude-select
 claude-select init
 ```
 
-默认情况下，`claude-select` 会在当前终端里直接启动 `claude`，然后逐个录入账号。
+默认情况下，`claude-select` 会在当前终端里直接启动 `claude auth login`，然后逐个录入账号。
 
 每个账号的流程是：
 
 1. 给账号起一个别名，比如 `work`、`personal`
-2. `claude-select` 启动 `claude`
-3. 在 `claude` CLI 会话里执行 `/login` 并完成授权
-4. 退出 `claude`，回到 `claude-select`
+2. `claude-select` 启动 `claude auth login`
+3. 完成授权
+4. 回到 `claude-select`
 5. 按回车，让 `claude-select` 把当前登录态采集进本地数据库
 6. 看到一段成功反馈，确认账号已写入数据库，并展示当前账号表
 
@@ -62,30 +62,32 @@ claude-select add work --no-launch
 ```bash
 $ claude-select init
 Claude account bootstrap
-Add accounts one by one. Complete /login for each account before capture.
+Add accounts one by one. Complete `claude auth login` for each account before capture.
 
 Alias (blank to finish): work
-Launching `claude` in this terminal.
-Inside Claude, run `/login` and finish account authorization.
-When login is complete, exit Claude to return here.
+Launching `claude auth login` in this terminal.
+`claude auth login` 会在当前终端里启动。
+登录完成后回到这里继续。
 Press Enter after login is complete...
 Captured work <a@company.com> [Team A].
 Status: healthy
 Expires in: 7h 57m
 
 Current registry:
-Alias  Kind  Email            Organization  Status   Expires In  Last Selected
------  ----  ---------------  ------------  -------  ----------  -------------
-work   cli   a@company.com    Team A        healthy  7h 57m      -
+Alias  Kind  Email            Organization  Status   Expires In  Last Selected  Last Synced
+-----  ----  ---------------  ------------  -------  ----------  -------------  -----------
+work   cli   a@company.com    Team A        healthy  7h 57m      -              just now
 Add another account? [Y/n] y
 ```
 
 ### 2. 可选：录入长期 SDK token
 
-如果你想给 Python 程序显式使用一个长期 token，可以执行：
+如果你想给 Python 程序显式使用一个长期 token，可以执行。若 alias 已经是一个
+CLI 账号，`add-token` 会把长期 token 挂到这个 alias 上，而不是覆盖它；在表格里会显示成
+`cli+token`：
 
 ```bash
-claude-select add-token work-sdk
+claude-select add-token work
 ```
 
 `add-token` 会启动 `claude setup-token`，尽量从终端输出里自动抓取 token，然后把它保存成一个简单的 SDK 凭证。由于这类官方长期 token 是 inference-only，profile metadata 探测只是 best-effort，失败时会回退到人工输入。
@@ -93,7 +95,7 @@ claude-select add-token work-sdk
 ### `add-token` 实际交互示例
 
 ```bash
-$ claude-select add-token work-sdk
+$ claude-select add-token work
 Launching `claude setup-token` in this terminal.
 Complete authorization. When the token is printed, copy it and return here.
 Detected the long-lived token from setup-token output.
@@ -101,15 +103,14 @@ Validated token for SDK/program use.
 Profile metadata is unavailable for this token scope.
 Email: a@company.com
 Organization (optional): Team A
-Captured [token] work-sdk <a@company.com> [Team A].
+Captured work <a@company.com> [Team A].
 Status: healthy
 Expires in: 364d
 
 Current registry:
-Alias     Kind   Email            Organization  Status   Expires In  Last Selected
---------  -----  ---------------  ------------  -------  ----------  -------------
-work      cli    a@company.com    Team A        healthy  7h 57m      -
-work-sdk  token  a@company.com    Team A        healthy  364d        -
+Alias  Kind       Email            Organization  Status   Expires In  Last Selected  Last Synced
+-----  ---------  ---------------  ------------  -------  ----------  -------------  -----------
+work   cli+token  a@company.com    Team A        healthy  7h 57m      -              just now
 ```
 
 ### 3. 查看当前存储内容
@@ -119,16 +120,17 @@ claude-select list
 claude-select list --usage
 claude-select whoami
 claude-select watch
+claude-select watch --usage
 ```
 
 展示效果大致如下：
 
 ```text
-Alias     Kind   Email             Organization    Status          Expires In  Last Selected
---------  -----  ----------------  --------------  --------------  ----------  -------------
-personal  cli    a@example.com     Personal        healthy         18h 12m     2h ago
-work      cli    b@company.com     Team A          expiring_soon   1h 05m      -
-work-sdk  token  b@company.com     Team A          healthy         364d        -
+Alias     Kind   Email             Organization    Status          Expires In  Last Selected  Last Synced
+--------  -----  ----------------  --------------  --------------  ----------  -------------  -----------
+personal  cli    a@example.com     Personal        healthy         18h 12m     2h ago         15m ago
+work      cli    b@company.com     Team A          expiring_soon   1h 05m      -              6m ago
+work-sdk  token  b@company.com     Team A          healthy         364d        -              just now
 ```
 
 加上 `--usage` 之后，`cli` 条目会显示 5h / 7d quota；`token` 条目会显示 `n/a`，因为 inference-only token 拿不到 quota/profile 接口。
@@ -200,18 +202,19 @@ claude-select whoami
 各命令含义：
 
 - `init`：首次引导录入多个 CLI 账号，结束后可选进入 token 录入阶段
-- `add`：默认先在当前终端启动 `claude`，然后把当前登录态录进 registry
-- `add-token`：默认先在当前终端启动 `claude setup-token`，然后把长期 token 存进 registry，供 SDK / 程序显式使用
-- `relogin`：默认先在当前终端启动 `claude`，然后用新的登录态覆盖某个已保存的 `cli` 条目
+- `add`：默认先在当前终端启动 `claude auth login`，然后把当前登录态录进 registry
+- `add-token`：默认先在当前终端启动 `claude setup-token`，然后把长期 token 存进 registry，供 SDK / 程序显式使用；如果 alias 已存在为 CLI 账号，就把 token 挂到该 alias 上
+- `relogin`：默认先在当前终端启动 `claude auth login`，然后用新的登录态覆盖某个已保存的 `cli` 条目
 - `list`：查看当前 registry，并先对当前 live account 做一次轻量同步
 - `list --usage`：拉取并显示 `cli` 条目的 5h / 7d quota；`token` 条目显示 `n/a`
-- `watch`：用 Rich live view 持续显示当前 Claude live account、本地 registry 和 CLI quota 信息，并定期同步当前 live state
+- `watch`：用 Rich live view 持续显示当前 Claude live account 和本地 registry，并定期同步当前 live state
+- `watch --usage`：在 live registry 表格中额外显示 5h / 7d quota 列
 - `select`：把某个已保存的 `cli` 快照写回当前 Claude CLI 登录态
 - `sync-current`：读取当前 Claude live auth state，把已经被 Claude 自动刷新的 token 同步回匹配的 `cli` 记录
 - `remove`：删除某个条目
 - `export-env`：输出给 Claude Agent SDK 使用的环境变量
 - `current`：显示最近一次给 CLI 选中的账号别名
-- `whoami`：先做一次轻量同步，再显示 Claude 当前 live auth state、匹配到的 alias 和 quota 摘要
+- `whoami`：先做一次轻量同步，再显示 Claude 当前 live auth state、匹配到的 alias、auth method、subscription 和 quota 摘要
 
 ## Python API 🐍
 

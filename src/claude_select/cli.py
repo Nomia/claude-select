@@ -43,11 +43,19 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
+        "-V",
         "--version",
         action="version",
         version=f"%(prog)s {_package_version()}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser(
+        "version",
+        aliases=["v"],
+        help="Show the installed claude-select version.",
+        description="Print the installed claude-select version.",
+    )
 
     init = subparsers.add_parser(
         "init",
@@ -93,10 +101,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Capture a long-lived token for SDK and program use.",
         description=(
             "Guide the user through `claude setup-token`, then store the resulting\n"
-            "long-lived token under one alias for SDK/program usage."
+            "long-lived token under one alias for SDK/program usage. If the alias\n"
+            "already exists as a CLI account, the token is attached to that alias\n"
+            "instead of replacing the CLI snapshot."
         ),
         epilog=(
             "Examples:\n"
+            "  claude-select add-token work\n"
             "  claude-select add-token work-sdk\n"
             "  claude-select add-token local-bot --no-launch"
         ),
@@ -105,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_token.add_argument(
         "alias",
         nargs="?",
-        help="Alias to store for this long-lived token.",
+        help="Alias to store for this long-lived token, or an existing CLI alias to attach it to.",
     )
     add_token.add_argument(
         "--no-launch",
@@ -140,6 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser(
         "list",
+        aliases=["ls"],
         help="Show all stored accounts as a table.",
         description="List the local auth registry with status, expiry, and last-selected time.",
     ).add_argument(
@@ -155,6 +167,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     watch.add_argument("--interval", type=int, default=30, help="Refresh interval in seconds.")
     watch.add_argument(
+        "--usage",
+        action="store_true",
+        help="Show 5h/7d usage columns in watch mode.",
+    )
+    watch.add_argument(
         "--sync-interval",
         type=int,
         default=60,
@@ -169,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     select = subparsers.add_parser(
         "select",
+        aliases=["use"],
         help="Write one stored account back into Claude's live auth state.",
         description=(
             "Select one stored alias and copy its auth snapshot into Claude's current\n"
@@ -186,6 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     remove = subparsers.add_parser(
         "remove",
+        aliases=["rm"],
         help="Delete one stored account.",
         description="Remove one alias and its captured auth snapshot from the local registry.",
     )
@@ -211,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     current = subparsers.add_parser(
         "current",
+        aliases=["cur"],
         help="Show the last alias selected for CLI usage.",
         description="Print the last alias selected with `claude-select select`.",
     )
@@ -238,6 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync_current = subparsers.add_parser(
         "sync-current",
+        aliases=["sync"],
         help="Sync the current Claude live auth state back into the local registry.",
         description=(
             "Read Claude's current live auth state, match it against the local registry,\n"
@@ -261,6 +282,9 @@ def main(argv: list[str] | None = None) -> int:
     manager = AuthManager()
 
     try:
+        if args.command in {"version", "v"}:
+            print(f"claude-select {_package_version()}")
+            return 0
         if args.command == "init":
             return _run_init(manager, launch=args.launch)
         if args.command == "add":
@@ -280,13 +304,19 @@ def main(argv: list[str] | None = None) -> int:
             account = manager.relogin_account(args.alias)
             _print_capture_feedback(manager, account, verb="Updated")
             return 0
-        if args.command == "list":
+        if args.command in {"list", "ls"}:
             _best_effort_sync_current(manager)
             print(manager.render_table(include_usage=args.usage))
             return 0
         if args.command == "watch":
-            return _run_watch(manager, args.interval, args.sync_interval, args.iterations)
-        if args.command == "select":
+            return _run_watch(
+                manager,
+                args.interval,
+                args.sync_interval,
+                args.iterations,
+                include_usage=args.usage,
+            )
+        if args.command in {"select", "use"}:
             alias = args.alias or manager.choose_alias_interactively()
             account = manager.select_account(alias)
             print(f"Selected {_account_display(manager, account)}.")
@@ -295,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  - {target}")
             print(f"Current CLI alias: {account['alias']}")
             return 0
-        if args.command == "remove":
+        if args.command in {"remove", "rm"}:
             manager.remove_account(args.alias)
             print(f"Removed {args.alias}.")
             return 0
@@ -307,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
                 for key, value in sorted(env.items()):
                     print(f"{key}={value}")
             return 0
-        if args.command == "current":
+        if args.command in {"current", "cur"}:
             payload: dict[str, Any] = {"current_alias": manager.current_alias()}
             if args.as_json:
                 print(json.dumps(payload, indent=2, sort_keys=True))
@@ -322,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(manager.render_current_live_account())
             return 0
-        if args.command == "sync-current":
+        if args.command in {"sync-current", "sync"}:
             payload = manager.sync_current_account()
             if args.as_json:
                 print(json.dumps(payload, indent=2, sort_keys=True))
@@ -485,7 +515,14 @@ def _package_version() -> str:
         return "unknown"
 
 
-def _run_watch(manager: AuthManager, interval: int, sync_interval: int, iterations: int) -> int:
+def _run_watch(
+    manager: AuthManager,
+    interval: int,
+    sync_interval: int,
+    iterations: int,
+    *,
+    include_usage: bool,
+) -> int:
     """Render the account table repeatedly with a live terminal view."""
     count = 0
     last_sync_monotonic = 0.0
@@ -496,18 +533,18 @@ def _run_watch(manager: AuthManager, interval: int, sync_interval: int, iteratio
             if now - last_sync_monotonic >= max(sync_interval, 1):
                 _best_effort_sync_current(manager)
                 last_sync_monotonic = now
-            live.update(_build_watch_renderable(manager), refresh=True)
+            live.update(_build_watch_renderable(manager, include_usage=include_usage), refresh=True)
             count += 1
             if iterations and count >= iterations:
                 return 0
             time.sleep(max(interval, 1))
 
 
-def _build_watch_renderable(manager: AuthManager) -> Group:
+def _build_watch_renderable(manager: AuthManager, *, include_usage: bool) -> Group:
     """Build the live watch layout."""
     return Group(
         _build_current_account_panel(manager),
-        _build_accounts_table(manager),
+        _build_accounts_table(manager, include_usage=include_usage),
     )
 
 
@@ -527,14 +564,18 @@ def _build_current_account_panel(manager: AuthManager) -> Panel:
         f"organization: {current['organization_name'] or '-'}",
         f"expires in: {current['expires_in']}",
     ]
+    if current.get("auth_method"):
+        lines.append(f"auth method: {current['auth_method']}")
+    if current.get("subscription_type"):
+        lines.append(f"subscription: {current['subscription_type']}")
     for target in current["targets"]:
         lines.append(f"target: {target}")
     return Panel("\n".join(lines), title="Current Claude live account", expand=True)
 
 
-def _build_accounts_table(manager: AuthManager) -> Table | Panel:
+def _build_accounts_table(manager: AuthManager, *, include_usage: bool) -> Table | Panel:
     """Render the local registry as a rich table."""
-    rows = manager.list_accounts(include_usage=True)
+    rows = manager.list_accounts(include_usage=include_usage)
     if not rows:
         return Panel("No accounts have been captured yet.", title="Registry", expand=True)
     table = Table(title="Local account registry", expand=True)
@@ -545,22 +586,31 @@ def _build_accounts_table(manager: AuthManager) -> Table | Panel:
     table.add_column("Status")
     table.add_column("Expires In")
     table.add_column("Last Selected")
-    table.add_column("5h Left")
-    table.add_column("5h Reset")
-    table.add_column("7d Left")
-    table.add_column("7d Reset")
+    table.add_column("Last Synced")
+    if include_usage:
+        table.add_column("5h Left")
+        table.add_column("5h Reset")
+        table.add_column("7d Left")
+        table.add_column("7d Reset")
     for row in rows:
-        table.add_row(
+        values = [
             row["alias"],
-            manager._display_auth_kind(row["auth_kind"]),
+            manager._display_auth_kind(str(row.get("kind_label") or row["auth_kind"])),
             row["email"],
             row["organization_name"] or "-",
             row["status"],
             row["expires_in"],
             manager._format_last_selected(row["last_selected_at"]),
-            row["quota_5h_left"],
-            row["quota_5h_reset"],
-            row["quota_7d_left"],
-            row["quota_7d_reset"],
-        )
+            manager._format_last_selected(row["last_synced_at"]),
+        ]
+        if include_usage:
+            values.extend(
+                [
+                    row["quota_5h_left"],
+                    row["quota_5h_reset"],
+                    row["quota_7d_left"],
+                    row["quota_7d_reset"],
+                ]
+            )
+        table.add_row(*[str(value) for value in values])
     return table

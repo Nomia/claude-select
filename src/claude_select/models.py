@@ -98,6 +98,8 @@ class AccountRecord:
     expires_at: int | None
     last_selected_at: str | None
     source: str
+    last_synced_at: str | None = None
+    has_sdk_token: bool = False
 
     def status(self, now: datetime | None = None) -> str:
         """Return the computed health status."""
@@ -114,3 +116,4 @@ class AccountDetails:
 
     record: AccountRecord
     snapshot: AuthSnapshot
+    sdk_token_snapshot: AuthSnapshot | None = None

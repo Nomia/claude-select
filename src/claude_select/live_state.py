@@ -191,6 +191,34 @@ class ClaudeAuthBackend:
             )
         return targets
 
+    def run_auth_login(self) -> bool:
+        """Run `claude auth login` if the Claude CLI is available."""
+        claude_path = shutil.which("claude")
+        if not claude_path:
+            return False
+        subprocess.run([claude_path, "auth", "login"], check=False)
+        return True
+
+    def read_auth_status(self) -> dict[str, Any] | None:
+        """Return structured `claude auth status` output when available."""
+        claude_path = shutil.which("claude")
+        if not claude_path:
+            return None
+        try:
+            result = subprocess.run(
+                [claude_path, "auth", "status"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError:
+            return None
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def _backup_live_state(self) -> None:
         """Back up current auth files before mutation."""
         self.backup_dir.mkdir(parents=True, exist_ok=True)
