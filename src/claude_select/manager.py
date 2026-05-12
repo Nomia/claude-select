@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
+from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
@@ -47,6 +51,11 @@ CONFLICTING_AUTH_ENV_VARS = {
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_SCOPES",
 }
+TOKEN_PROFILE_API_URLS = (
+    "https://api.anthropic.com/api/oauth/profile",
+    "https://claude.ai/api/oauth/profile",
+)
+TOKEN_PROFILE_BETA_HEADER = "oauth-2025-04-20"
 
 
 class AuthManager:
@@ -57,10 +66,12 @@ class AuthManager:
         registry: AuthRegistry | None = None,
         auth_backend: ClaudeAuthBackend | None = None,
         usage_provider: UsageProvider | None = None,
+        token_metadata_fetcher: Callable[[str], dict[str, Any]] | None = None,
     ):
         self.registry = registry or AuthRegistry()
         self.auth_backend = auth_backend or ClaudeAuthBackend()
         self.usage_provider = usage_provider or OAuthUsageProvider(self.registry)
+        self.token_metadata_fetcher = token_metadata_fetcher or self._fetch_token_metadata
 
     SDK_FIVE_HOUR_LIMIT_PERCENT = 100.0
     SDK_SEVEN_DAY_LIMIT_PERCENT = 100.0
@@ -132,6 +143,41 @@ class AuthManager:
             expires_at_override=self._one_year_expiry_epoch_ms(),
         )
         return self._record_payload(record)
+
+    def resolve_token_metadata(self, token: str) -> dict[str, str]:
+        """Resolve token metadata for one long-lived setup-token entry.
+
+        This is a best-effort lookup. Claude does not currently document a stable
+        third-party metadata endpoint for `claude setup-token`, so failures should
+        fall back to prompting the user for missing fields.
+        """
+        normalized_token = token.strip()
+        if not normalized_token:
+            raise AccountSelectionError("Token cannot be empty.")
+        try:
+            raw = self.token_metadata_fetcher(normalized_token)
+        except Exception:
+            return {}
+        return self._normalize_token_metadata(raw)
+
+    def probe_token(self, token: str) -> dict[str, Any]:
+        """Probe one long-lived token and return best-effort validation details."""
+        normalized_token = token.strip()
+        if not normalized_token:
+            raise AccountSelectionError("Token cannot be empty.")
+        try:
+            raw = self.token_metadata_fetcher(normalized_token)
+        except Exception as exc:
+            return {
+                "valid": False,
+                "metadata": {},
+                "error": str(exc),
+            }
+        return {
+            "valid": True,
+            "metadata": self._normalize_token_metadata(raw),
+            "error": None,
+        }
 
     def relogin_account(self, alias: str) -> dict[str, Any]:
         """Overwrite an existing account using the current live auth state."""
@@ -543,6 +589,63 @@ class AuthManager:
                 }
             },
         )
+
+    def _fetch_token_metadata(self, token: str) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for url in TOKEN_PROFILE_API_URLS:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "anthropic-beta": TOKEN_PROFILE_BETA_HEADER,
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10.0) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except (urllib.error.URLError, json.JSONDecodeError) as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise last_error
+        raise AccountSelectionError("Unable to resolve token metadata.")
+
+    @staticmethod
+    def _normalize_token_metadata(raw: dict[str, Any]) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            return {}
+
+        def _string(value: object) -> str:
+            return str(value).strip() if value is not None else ""
+
+        organization = raw.get("organization")
+        if not isinstance(organization, dict):
+            organization = {}
+
+        metadata = {
+            "email": (
+                _string(raw.get("emailAddress"))
+                or _string(raw.get("email"))
+            ),
+            "organization_name": (
+                _string(raw.get("organizationName"))
+                or _string(organization.get("name"))
+            ),
+            "organization_id": (
+                _string(raw.get("organizationUuid"))
+                or _string(raw.get("organizationId"))
+                or _string(organization.get("uuid"))
+                or _string(organization.get("id"))
+            ),
+            "account_uuid": (
+                _string(raw.get("accountUuid"))
+                or _string(raw.get("accountId"))
+                or _string(raw.get("uuid"))
+                or _string(raw.get("id"))
+            ),
+        }
+        return {key: value for key, value in metadata.items() if value}
 
     def _normalize_alias(self, alias: str) -> str:
         normalized = alias.strip()

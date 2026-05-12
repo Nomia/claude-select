@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,8 @@ from rich.table import Table
 
 from claude_select.exceptions import ClaudeSelectError
 from claude_select.manager import AuthManager
+
+TOKEN_RE = re.compile(r"(sk-ant-oat[0-9A-Za-z._-]+)")
 
 
 def _account_display(manager: AuthManager, account: dict[str, Any]) -> str:
@@ -262,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "add-token":
             alias = args.alias or input("Alias: ").strip()
-            token_payload = _prompt_for_token_capture(launch=args.launch)
+            token_payload = _prompt_for_token_capture(manager, launch=args.launch)
             account = manager.add_token_account(alias, **token_payload, overwrite=True)
             _print_capture_feedback(manager, account, verb="Captured")
             return 0
@@ -348,7 +351,7 @@ def _run_init(manager: AuthManager, *, launch: bool) -> int:
             alias = input("Token alias (blank to finish): ").strip()
             if not alias:
                 break
-            token_payload = _prompt_for_token_capture(launch=launch)
+            token_payload = _prompt_for_token_capture(manager, launch=launch)
             account = manager.add_token_account(alias, **token_payload, overwrite=True)
             _print_capture_feedback(manager, account, verb="Captured")
             if input("Add another token? [Y/n] ").strip().lower() in {"n", "no"}:
@@ -376,31 +379,83 @@ def _best_effort_sync_current(manager: AuthManager) -> dict[str, Any] | None:
         return None
 
 
-def _prompt_for_token_capture(*, launch: bool) -> dict[str, str]:
-    """Guide the user through setup-token and collect metadata."""
-    _run_setup_token(launch)
-    return {
-        "token": input("Paste the long-lived token: ").strip(),
-        "email": input("Email: ").strip(),
-        "organization_name": input("Organization (optional): ").strip(),
-        "organization_id": input("Organization ID (optional): ").strip(),
-        "account_uuid": input("Account UUID (optional): ").strip(),
+def _prompt_for_token_capture(manager: AuthManager, *, launch: bool) -> dict[str, str]:
+    """Guide the user through setup-token and collect token metadata."""
+    setup_output = _run_setup_token(launch)
+    token = _extract_token_from_output(setup_output)
+    if token:
+        print("Detected the long-lived token from setup-token output.")
+    else:
+        token = input("Paste the long-lived token: ").strip()
+
+    probe = manager.probe_token(token)
+    if probe["valid"]:
+        print("Validated token successfully.")
+    else:
+        print("Could not validate the token automatically.")
+        if probe["error"]:
+            print(f"Reason: {probe['error']}")
+
+    resolved = dict(probe["metadata"])
+    if resolved:
+        print("Detected account metadata:")
+        print(f"  email: {resolved.get('email', '-') or '-'}")
+        print(f"  organization: {resolved.get('organization_name', '-') or '-'}")
+    payload = {
+        "token": token,
+        "email": resolved.get("email", ""),
+        "organization_name": resolved.get("organization_name", ""),
+        "organization_id": resolved.get("organization_id", ""),
+        "account_uuid": resolved.get("account_uuid", ""),
     }
+    if not payload["email"]:
+        payload["email"] = input("Email: ").strip()
+    if not payload["organization_name"]:
+        payload["organization_name"] = input("Organization (optional): ").strip()
+    return payload
 
 
-def _run_setup_token(launch: bool) -> None:
+def _run_setup_token(launch: bool) -> str:
     """Guide the user through `claude setup-token`."""
     if launch:
         claude_path = shutil.which("claude")
         if claude_path:
             print("Launching `claude setup-token` in this terminal.")
             print("Complete authorization. When the token is printed, copy it and return here.")
-            subprocess.run([claude_path, "setup-token"], check=False)
+            return _stream_and_capture_command([claude_path, "setup-token"])
         else:
             print("`claude` was not found in PATH.")
             print("Run `claude setup-token`, copy the token, then return here.")
     else:
         print("Run `claude setup-token`, copy the token, then return here.")
+    return ""
+
+
+def _stream_and_capture_command(command: list[str]) -> str:
+    """Run one interactive command, echoing output while capturing it."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=None,
+        text=True,
+        bufsize=1,
+    )
+    output: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="")
+        output.append(line)
+    process.wait()
+    return "".join(output)
+
+
+def _extract_token_from_output(output: str) -> str | None:
+    """Best-effort token extraction from `claude setup-token` terminal output."""
+    match = TOKEN_RE.search(output)
+    if not match:
+        return None
+    return match.group(1)
 
 
 def _run_watch(manager: AuthManager, interval: int, sync_interval: int, iterations: int) -> int:

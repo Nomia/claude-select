@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import urllib.error
+
 import pytest
 
 from claude_select.exceptions import (
@@ -76,6 +79,164 @@ def test_add_token_account_and_build_sdk_env(registry, fake_auth_backend, fake_u
     assert captured["auth_kind"] == "token"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "long-lived-token"
     assert env["PATH"] == "/bin"
+
+
+def test_resolve_token_metadata(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+        token_metadata_fetcher=lambda _token: {
+            "emailAddress": "sdk@example.com",
+            "organizationName": "SDK Org",
+            "organizationUuid": "org-sdk",
+            "accountUuid": "acct-sdk",
+        },
+    )
+
+    metadata = manager.resolve_token_metadata("long-lived-token")
+
+    assert metadata == {
+        "email": "sdk@example.com",
+        "organization_name": "SDK Org",
+        "organization_id": "org-sdk",
+        "account_uuid": "acct-sdk",
+    }
+
+
+def test_resolve_token_metadata_rejects_empty_token(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+
+    with pytest.raises(AccountSelectionError):
+        manager.resolve_token_metadata("   ")
+
+
+def test_resolve_token_metadata_falls_back_on_fetch_error(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+        token_metadata_fetcher=lambda _token: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    metadata = manager.resolve_token_metadata("long-lived-token")
+
+    assert metadata == {}
+
+
+def test_probe_token_success(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+        token_metadata_fetcher=lambda _token: {
+            "emailAddress": "sdk@example.com",
+            "organizationName": "SDK Org",
+        },
+    )
+
+    payload = manager.probe_token("long-lived-token")
+
+    assert payload["valid"] is True
+    assert payload["metadata"]["email"] == "sdk@example.com"
+    assert payload["error"] is None
+
+
+def test_probe_token_failure(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+        token_metadata_fetcher=lambda _token: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    payload = manager.probe_token("long-lived-token")
+
+    assert payload["valid"] is False
+    assert payload["metadata"] == {}
+    assert payload["error"] == "boom"
+
+
+def test_fetch_token_metadata_and_normalize_nested_payload(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "email": "sdk@example.com",
+                    "organization": {"name": "SDK Org", "uuid": "org-sdk"},
+                    "id": "acct-sdk",
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout=10.0: FakeResponse(),
+    )
+
+    metadata = manager.resolve_token_metadata("long-lived-token")
+
+    assert metadata == {
+        "email": "sdk@example.com",
+        "organization_name": "SDK Org",
+        "organization_id": "org-sdk",
+        "account_uuid": "acct-sdk",
+    }
+
+
+def test_fetch_token_metadata_tries_multiple_urls(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    calls: list[str] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"emailAddress":"sdk@example.com"}'
+
+    def fake_urlopen(request, timeout=10.0):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise urllib.error.URLError("boom")
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    metadata = manager.resolve_token_metadata("long-lived-token")
+
+    assert metadata["email"] == "sdk@example.com"
+    assert len(calls) == 2
 
 
 class AliasUsageProvider:

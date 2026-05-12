@@ -30,6 +30,11 @@ claude-select add work
 claude-select add-token work-sdk
 ```
 
+`add-token` launches `claude setup-token`, tries to detect the token from the
+terminal output, validates it, and then resolves the token's email and
+organization automatically. Manual prompts only appear if token detection or
+metadata detection fails.
+
 ## Minimal usage
 
 ```python
@@ -127,6 +132,29 @@ env = manager.build_sdk_env_auto()
 ```
 
 This only considers `token` entries. It checks cached 5h / 7d usage and picks the best available long-lived token before returning an env mapping.
+
+This decision happens when your program asks for an env mapping, so the practical trigger is "right before a Claude Agent SDK call." It does not run in the background, and it does not switch tokens in the middle of an already-running request.
+
+Current rules:
+
+- only `token` entries participate
+- any token already at `100%` on its 5h or 7d window is skipped
+- among the remaining tokens, the one with the most 5h quota left wins first, then the most 7d quota left
+- usage is cached locally for 60 seconds
+
+Typical pattern:
+
+```python
+from claude_select import AuthManager
+from claude_code_sdk import ClaudeAgentOptions, query
+
+manager = AuthManager()
+env = manager.build_sdk_env_auto()
+options = ClaudeAgentOptions(env=env)
+
+async for message in query(prompt="summarize this repository", options=options):
+    print(message)
+```
 
 ## Expiry behavior
 

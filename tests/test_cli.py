@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from claude_select import cli
+from claude_select.exceptions import ClaudeSelectError
 from claude_select.manager import AuthManager
 
 
@@ -117,16 +118,62 @@ def test_cli_add_token(monkeypatch, capsys, registry, fake_auth_backend, fake_us
         usage_provider=fake_usage_provider,
     )
     monkeypatch.setattr(cli, "AuthManager", lambda: manager)
-    monkeypatch.setattr(cli, "_run_setup_token", lambda _launch: None)
-    answers = iter(["long-lived-token", "sdk@example.com", "SDK Org", "", ""])
+    monkeypatch.setattr(
+        cli,
+        "_run_setup_token",
+        lambda _launch: "Your OAuth token:\n\nsk-ant-oat01-tokenvalue\n",
+    )
+    monkeypatch.setattr(
+        manager,
+        "probe_token",
+        lambda _token: {
+            "valid": True,
+            "metadata": {
+                "email": "sdk@example.com",
+                "organization_name": "SDK Org",
+            },
+            "error": None,
+        },
+    )
+    answers = iter([])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
 
     assert cli.main(["add-token", "work-sdk"]) == 0
 
     output = capsys.readouterr().out
+    assert "Detected the long-lived token from setup-token output." in output
+    assert "Validated token successfully." in output
+    assert "Detected account metadata:" in output
+    assert "email: sdk@example.com" in output
     assert "[token] work-sdk <sdk@example.com> [SDK Org]." in output
     assert "Kind" in output
     assert "token" in output
+
+
+def test_cli_add_token_prompts_when_metadata_missing(
+    monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    monkeypatch.setattr(cli, "AuthManager", lambda: manager)
+    monkeypatch.setattr(cli, "_run_setup_token", lambda _launch: "")
+    monkeypatch.setattr(
+        manager,
+        "probe_token",
+        lambda _token: {"valid": False, "metadata": {}, "error": "boom"},
+    )
+    answers = iter(["long-lived-token", "sdk@example.com", "SDK Org"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    assert cli.main(["add-token", "work-sdk"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Could not validate the token automatically." in output
+    assert "Detected account metadata:" not in output
+    assert "[token] work-sdk <sdk@example.com> [SDK Org]." in output
 
 
 def test_cli_init_with_token_phase(
@@ -139,7 +186,19 @@ def test_cli_init_with_token_phase(
     )
     monkeypatch.setattr(cli, "AuthManager", lambda: manager)
     monkeypatch.setattr(manager, "wait_for_login", lambda _launch: None)
-    monkeypatch.setattr(cli, "_run_setup_token", lambda _launch: None)
+    monkeypatch.setattr(cli, "_run_setup_token", lambda _launch: "")
+    monkeypatch.setattr(
+        manager,
+        "probe_token",
+        lambda _token: {
+            "valid": True,
+            "metadata": {
+                "email": "sdk@example.com",
+                "organization_name": "SDK Org",
+            },
+            "error": None,
+        },
+    )
     answers = iter(
         [
             "work",
@@ -147,10 +206,6 @@ def test_cli_init_with_token_phase(
             "y",
             "work-sdk",
             "long-lived-token",
-            "sdk@example.com",
-            "SDK Org",
-            "",
-            "",
             "n",
         ]
     )
@@ -161,6 +216,60 @@ def test_cli_init_with_token_phase(
     output = capsys.readouterr().out
     assert "[token] work-sdk <sdk@example.com> [SDK Org]." in output
     assert "Current registry:" in output
+
+
+def test_extract_token_from_output():
+    output = "Your OAuth token:\n\nsk-ant-oat01-abc_DEF-123\n"
+
+    assert cli._extract_token_from_output(output) == "sk-ant-oat01-abc_DEF-123"
+
+
+def test_extract_token_from_output_missing():
+    assert cli._extract_token_from_output("no token here") is None
+
+
+def test_stream_and_capture_command(monkeypatch, capsys):
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = iter(["line 1\n", "line 2\n"])
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    output = cli._stream_and_capture_command(["claude", "setup-token"])
+
+    assert output == "line 1\nline 2\n"
+    assert "line 1" in capsys.readouterr().out
+
+
+def test_run_setup_token_without_launch(capsys):
+    output = cli._run_setup_token(False)
+
+    assert output == ""
+    assert "Run `claude setup-token`, copy the token, then return here." in capsys.readouterr().out
+
+
+def test_build_panels_for_empty_and_error_state(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    monkeypatch.setattr(
+        manager,
+        "current_live_account",
+        lambda: (_ for _ in ()).throw(ClaudeSelectError("bad live state")),
+    )
+
+    panel = cli._build_current_account_panel(manager)
+    table_or_panel = cli._build_accounts_table(manager)
+
+    assert "bad live state" in str(panel.renderable)
+    assert "No accounts have been captured yet." in str(table_or_panel.renderable)
 
 
 def test_cli_add_no_launch(monkeypatch, registry, fake_auth_backend, fake_usage_provider):

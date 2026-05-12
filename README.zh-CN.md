@@ -125,11 +125,11 @@ work   cli   a@company.com    Team A        healthy  7h 57m      -
 $ claude-select add-token work-sdk
 Launching `claude setup-token` in this terminal.
 Complete authorization. When the token is printed, copy it and return here.
-Paste the long-lived token: ********
-Email: a@company.com
-Organization (optional): Team A
-Organization ID (optional):
-Account UUID (optional):
+Detected the long-lived token from setup-token output.
+Validated token successfully.
+Detected account metadata:
+  email: a@company.com
+  organization: Team A
 Captured [token] work-sdk <a@company.com> [Team A].
 Status: healthy
 Expires in: 8759h 59m
@@ -220,6 +220,29 @@ env = manager.build_sdk_env_auto()
 ```
 
 `build_sdk_env_auto()` 只会在 `token` 条目里挑选，依据缓存的 5h / 7d quota 状态选择当前最合适的 token，然后返回 env。
+
+这个自动切换发生在你的程序向 `claude-select` 请求 SDK env 的那一刻。也就是说，实际决策点是在每次调用 Claude Agent SDK 之前，而不是后台常驻切换，也不会在一个已经跑起来的 Claude 请求中途切 token。
+
+当前规则是：
+
+- 只在 `token` 条目里挑选
+- 任何 5h 或 7d 窗口已经到 `100%` 的 token 都会被跳过
+- 在剩下的 token 里，优先选择 5h 剩余额度更多的；如果接近，再比较 7d 剩余额度
+- usage 数据本地缓存 60 秒，所以重复的 SDK 调用会复用最近一次 quota 结果，而不是每次都重新请求
+
+最小用法：
+
+```python
+from claude_select import AuthManager
+from claude_code_sdk import ClaudeAgentOptions, query
+
+manager = AuthManager()
+env = manager.build_sdk_env_auto()
+options = ClaudeAgentOptions(env=env)
+
+async for message in query(prompt="summarize this repository", options=options):
+    print(message)
+```
 
 完整 Python SDK 指南：
 

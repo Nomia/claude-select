@@ -30,6 +30,10 @@ claude-select add work
 claude-select add-token work-sdk
 ```
 
+`add-token` 会先启动 `claude setup-token`，尽量从终端输出里自动抓取 token，
+再验证它，并自动解析这个 token 对应的 email 和 organization。只有自动探测失败时，
+才会回退到人工输入。
+
 ## 最小用法
 
 ```python
@@ -127,6 +131,29 @@ env = manager.build_sdk_env_auto()
 ```
 
 这个方法只会在 `token` 条目里挑选。它会检查缓存的 5h / 7d usage，然后选出当前最合适的长期 token，再返回 env。
+
+这个决策发生在你的程序请求 env 的那一刻，所以实际触发点就是“每次调用 Claude Agent SDK 之前”。它不是后台常驻调度器，也不会在一个已经运行中的请求中途切 token。
+
+当前规则：
+
+- 只在 `token` 条目里挑选
+- 任何 5h 或 7d 窗口已经到 `100%` 的 token 都会被跳过
+- 在剩下的 token 里，优先选 5h 剩余额度更多的；如果接近，再比较 7d 剩余额度
+- usage 结果会本地缓存 60 秒
+
+常见用法：
+
+```python
+from claude_select import AuthManager
+from claude_code_sdk import ClaudeAgentOptions, query
+
+manager = AuthManager()
+env = manager.build_sdk_env_auto()
+options = ClaudeAgentOptions(env=env)
+
+async for message in query(prompt="summarize this repository", options=options):
+    print(message)
+```
 
 ## 过期行为
 

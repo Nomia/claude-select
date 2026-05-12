@@ -125,11 +125,11 @@ work   cli   a@company.com    Team A        healthy  7h 57m      -
 $ claude-select add-token work-sdk
 Launching `claude setup-token` in this terminal.
 Complete authorization. When the token is printed, copy it and return here.
-Paste the long-lived token: ********
-Email: a@company.com
-Organization (optional): Team A
-Organization ID (optional):
-Account UUID (optional):
+Detected the long-lived token from setup-token output.
+Validated token successfully.
+Detected account metadata:
+  email: a@company.com
+  organization: Team A
 Captured [token] work-sdk <a@company.com> [Team A].
 Status: healthy
 Expires in: 8759h 59m
@@ -220,6 +220,29 @@ env = manager.build_sdk_env_auto()
 ```
 
 `build_sdk_env_auto()` only considers `token` entries, checks their cached 5h / 7d quota state, and chooses the best available token before returning an env mapping.
+
+The automatic switch happens when your program asks `claude-select` to build the SDK env. In practice, that means the decision is made immediately before each Claude Agent SDK call that uses `build_sdk_env_auto()`. It does not run as a background daemon, and it does not switch tokens in the middle of an already-running Claude request.
+
+Current rules:
+
+- only `token` entries participate
+- any token already at `100%` on its 5h or 7d window is skipped
+- among the remaining tokens, the one with the most 5h quota left wins first, then the most 7d quota left
+- usage data is cached for 60 seconds, so repeated SDK calls reuse recent quota state instead of fetching it every time
+
+Minimal pattern:
+
+```python
+from claude_select import AuthManager
+from claude_code_sdk import ClaudeAgentOptions, query
+
+manager = AuthManager()
+env = manager.build_sdk_env_auto()
+options = ClaudeAgentOptions(env=env)
+
+async for message in query(prompt="summarize this repository", options=options):
+    print(message)
+```
 
 Full Python SDK guide:
 

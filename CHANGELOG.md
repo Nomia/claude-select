@@ -6,6 +6,17 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-12
+
+### Added
+
+- Added best-effort token capture from `claude setup-token` terminal output plus immediate token probing during `add-token`.
+
+### Changed
+
+- `add-token` now tries to validate the long-lived token and auto-resolve email/organization metadata before falling back to manual prompts.
+- Clarified English and Chinese README / Python SDK docs around SDK auto token selection, including the exact trigger point before each Claude Agent SDK call.
+
 ## [0.3.0] - 2026-05-12
 
 ### Added
