@@ -163,6 +163,8 @@ If a `cli` entry is expired:
 Recovery flow:
 
 ```bash
+claude-select refresh work
+# If refresh fails:
 claude-select relogin work
 ```
 

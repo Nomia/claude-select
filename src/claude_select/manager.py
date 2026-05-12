@@ -289,12 +289,42 @@ class AuthManager:
 
     def select_account(self, alias: str) -> dict[str, Any]:
         """Write a stored auth snapshot back into Claude's live auth backend."""
+        return self._activate_cli_account(alias, allow_expired=False)
+
+    def refresh_account(self, alias: str, *, prompt: str = "ping") -> dict[str, Any]:
+        """Try to refresh one CLI account by triggering a lightweight Claude request."""
+        account = self._activate_cli_account(alias, allow_expired=True)
+        ok, output = self.auth_backend.run_print_prompt(prompt)
+        if not ok:
+            raise ConfigError(f"Claude refresh probe failed: {output}")
+        sync_payload = self.sync_current_account()
+        refreshed = self.registry.get_account(account["alias"]).record
+        return {
+            "alias": account["alias"],
+            "probe_prompt": prompt,
+            "probe_output": output,
+            "sync": sync_payload,
+            "record": self._record_payload(refreshed),
+        }
+
+    def refresh_candidates(self) -> list[str]:
+        """Return CLI aliases that should be refreshed soon."""
+        rows = self.list_accounts(include_usage=False)
+        return [
+            str(row["alias"])
+            for row in rows
+            if row["auth_kind"] == AUTH_KIND_CLI_SNAPSHOT
+            and row["status"] in {STATUS_EXPIRED, "expiring_soon"}
+        ]
+
+    def _activate_cli_account(self, alias: str, *, allow_expired: bool) -> dict[str, Any]:
+        """Write a stored CLI snapshot back into Claude's live auth backend."""
         details = self.registry.get_account(self._normalize_alias(alias))
         if details.record.auth_kind != AUTH_KIND_CLI_SNAPSHOT:
             raise AccountKindError(
                 f"Account '{details.record.alias}' is a token entry and cannot be selected for CLI."
             )
-        if details.record.status() == STATUS_EXPIRED:
+        if not allow_expired and details.record.status() == STATUS_EXPIRED:
             raise AuthExpiredError(
                 f"Account '{details.record.alias}' is expired. Run relogin before selecting it."
             )

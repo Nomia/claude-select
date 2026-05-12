@@ -196,3 +196,37 @@ def test_auth_backend_read_auth_status_falls_back(monkeypatch):
     backend = ClaudeAuthBackend()
 
     assert backend.read_auth_status() is None
+
+
+def test_auth_backend_run_print_prompt(monkeypatch):
+    class Result:
+        returncode = 0
+        stdout = "pong\n"
+        stderr = ""
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: Result())
+
+    backend = ClaudeAuthBackend()
+
+    ok, output = backend.run_print_prompt("ping")
+
+    assert ok is True
+    assert output == "pong"
+
+
+def test_auth_backend_run_print_prompt_failure(monkeypatch):
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: Result())
+
+    backend = ClaudeAuthBackend()
+
+    ok, output = backend.run_print_prompt("ping")
+
+    assert ok is False
+    assert output == "boom"

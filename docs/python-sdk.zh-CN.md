@@ -160,6 +160,8 @@ SDK 这一层不会自动 refresh token。
 恢复方式：
 
 ```bash
+claude-select refresh work
+# 如果 refresh 失败：
 claude-select relogin work
 ```
 

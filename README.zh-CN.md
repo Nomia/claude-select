@@ -12,7 +12,7 @@
 
 它会保存两类条目：
 
-- `cli` 条目：来自 Claude CLI `auth login` 抓取；支持 `watch`、`list --usage`、`whoami`、`select`、`sync-current`、`relogin`
+- `cli` 条目：来自 Claude CLI `auth login` 抓取；支持 `watch`、`list --usage`、`whoami`、`select`、`sync-current`、`refresh`、`relogin`
 - `token` 条目：来自 `claude setup-token`；只作为简单的长期 SDK 凭证保存，给 Python / 程序显式使用
 
 长期 `token` 条目**不参与** quota 监控、按 quota 自动选择或 CLI 切换。
@@ -187,6 +187,7 @@ Python 这边和 CLI 共用同一份本地 registry，但它不会改写 Claude 
 claude-select init
 claude-select add <alias>
 claude-select add-token <alias>
+claude-select refresh [alias]
 claude-select relogin <alias>
 claude-select list
 claude-select list --usage
@@ -204,6 +205,7 @@ claude-select whoami
 - `init`：首次引导录入多个 CLI 账号，结束后可选进入 token 录入阶段
 - `add`：默认先在当前终端启动 `claude auth login`，然后把当前登录态录进 registry
 - `add-token`：默认先在当前终端启动 `claude setup-token`，然后把长期 token 存进 registry，供 SDK / 程序显式使用；如果 alias 已存在为 CLI 账号，就把 token 挂到该 alias 上
+- `refresh`：对一个 CLI alias 或所有即将过期/已过期的 CLI alias 走轻量恢复路径：`select -> claude -p "ping" -> sync-current`
 - `relogin`：默认先在当前终端启动 `claude auth login`，然后用新的登录态覆盖某个已保存的 `cli` 条目
 - `list`：查看当前 registry，并先对当前 live account 做一次轻量同步
 - `list --usage`：拉取并显示 `cli` 条目的 5h / 7d quota；`token` 条目显示 `n/a`
@@ -286,7 +288,9 @@ quota 数据会在本地缓存 60 秒。`watch`、`whoami` 和重复的 CLI quot
 
 - `select` 会失败
 - `build_sdk_env()` 对该 alias 会失败
-- 你应该执行 `claude-select relogin <alias>`
+- 先尝试执行 `claude-select refresh <alias>`
+- 如果 refresh 成功，Claude 会刷新 live session，而 `claude-select` 会把新状态同步回 registry
+- 如果 refresh 失败，再执行 `claude-select relogin <alias>`
 
 长期 `token` 条目不参与 `relogin`；如果你想替换它，就重新执行一次 `add-token`。
 
@@ -321,7 +325,7 @@ quota 数据会在本地缓存 60 秒。`watch`、`whoami` 和重复的 CLI quot
 
 ## 当前限制 ⚠️
 
-- 只有 `cli` 条目支持 quota 监控、`watch`、`select`、`sync-current` 和 `relogin`。
+- 只有 `cli` 条目支持 quota 监控、`watch`、`select`、`sync-current`、`refresh` 和 `relogin`。
 - `token` 条目只是简单的 SDK 凭证。
 - 工具不会自动 refresh OAuth token。
 - 当前实现依赖 Claude 当前本地认证布局没有发生大改。

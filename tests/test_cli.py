@@ -394,6 +394,29 @@ def test_cli_watch_usage_flag(
     ]
 
 
+def test_watch_hint_panel_for_expired_account(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.list_accounts = lambda include_usage=False: [  # type: ignore[method-assign]
+        {
+            "alias": "work",
+            "auth_kind": "cli",
+            "kind_label": "cli",
+            "status": "expired",
+        }
+    ]
+
+    hint = cli._build_watch_hint_panel(manager)
+
+    assert hint is not None
+    assert hint.title == "Action recommended"
+    assert "claude-select refresh work" in str(hint.renderable)
+    assert "claude-select relogin work" in str(hint.renderable)
+
+
 def test_cli_sync_current(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
@@ -409,6 +432,53 @@ def test_cli_sync_current(monkeypatch, capsys, registry, fake_auth_backend, fake
     output = capsys.readouterr().out
     assert "Synced current live auth state into 'work'." in output
     assert "Current registry:" in output
+
+
+def test_cli_refresh(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    account = manager.capture_current_account("work")
+    monkeypatch.setattr(cli, "AuthManager", lambda: manager)
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=account["auth_kind"],
+        email=account["email"],
+        organization_name=account["organization_name"],
+        organization_id=account["organization_id"],
+        account_uuid=account["account_uuid"],
+        captured_at=account["captured_at"],
+        expires_at=0,
+        last_selected_at=account["last_selected_at"],
+        source=account["source"],
+        snapshot=manager.get_account("work").snapshot,
+        last_synced_at=account["last_synced_at"],
+    )
+
+    assert cli.main(["refresh", "work"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Refreshed work via `claude -p`." in output
+    assert "Probe output: pong" in output
+    assert fake_auth_backend.print_prompts == ["ping"]
+
+
+def test_cli_refresh_without_targets(
+    monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    monkeypatch.setattr(cli, "AuthManager", lambda: manager)
+
+    assert cli.main(["refresh"]) == 0
+
+    output = capsys.readouterr().out
+    assert "No CLI accounts currently need refresh." in output
 
 
 def test_cli_help_texts(capsys):

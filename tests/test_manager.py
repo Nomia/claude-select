@@ -45,6 +45,68 @@ def test_select_account_writes_snapshot(registry, fake_auth_backend, fake_usage_
     assert fake_auth_backend.written_snapshot.oauth_account["emailAddress"] == "work@example.com"
 
 
+def test_refresh_account_uses_print_probe(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    details = manager.get_account("work")
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
+
+    payload = manager.refresh_account("work")
+
+    assert payload["alias"] == "work"
+    assert payload["probe_output"] == "pong"
+    assert fake_auth_backend.print_prompts == ["ping"]
+
+
+def test_refresh_candidates_filters_cli_accounts(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    manager.add_token_account(
+        "sdk-only",
+        "long-lived-token",
+        email="sdk@example.com",
+        organization_name="SDK Org",
+    )
+    details = manager.get_account("work")
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
+
+    assert manager.refresh_candidates() == ["work"]
+
+
 def test_build_sdk_env(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,

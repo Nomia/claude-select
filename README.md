@@ -12,7 +12,7 @@
 
 It stores two entry kinds:
 
-- `cli` entries: captured from Claude CLI `auth login`; these support `watch`, `list --usage`, `whoami`, `select`, `sync-current`, and `relogin`
+- `cli` entries: captured from Claude CLI `auth login`; these support `watch`, `list --usage`, `whoami`, `select`, `sync-current`, `refresh`, and `relogin`
 - `token` entries: captured from `claude setup-token`; these are simple long-lived SDK credentials for Python/program use
 
 Long-lived `token` entries do **not** participate in quota monitoring, quota-aware auto-selection, or CLI account switching.
@@ -186,6 +186,7 @@ Full Python SDK guide:
 claude-select init
 claude-select add <alias>
 claude-select add-token <alias>
+claude-select refresh [alias]
 claude-select relogin <alias>
 claude-select list
 claude-select list --usage
@@ -203,6 +204,7 @@ Command behavior:
 - `init`: guided multi-account bootstrap for CLI accounts, then optional token capture phase
 - `add`: launch `claude auth login` in the current terminal by default, then capture the current login into the registry
 - `add-token`: launch `claude setup-token` in the current terminal by default, then store a long-lived token for explicit SDK/program use; if the alias already exists as a CLI account, the token is attached to that alias
+- `refresh`: try the lightweight recovery path for one CLI alias or all expired/expiring aliases by doing `select -> claude -p "ping" -> sync-current`
 - `relogin`: launch `claude auth login` in the current terminal by default, then overwrite one stored CLI alias after the user logs in again
 - `list`: show the current registry table and do a light sync of the current live account first
 - `list --usage`: fetch and display 5h / 7d quota information for `cli` entries; `token` entries show `n/a`
@@ -285,7 +287,9 @@ If a `cli` account is expired:
 
 - `select` fails
 - `build_sdk_env()` fails for that alias
-- you should run `claude-select relogin <alias>`
+- first try `claude-select refresh <alias>`
+- if refresh works, Claude refreshes the live session and `claude-select` syncs the new state back into the registry
+- if refresh fails, run `claude-select relogin <alias>`
 
 Long-lived `token` entries do not participate in `relogin`; replace them by running `add-token` again.
 
@@ -320,7 +324,7 @@ The registry is the source of truth. `select` writes one stored `cli` snapshot b
 
 ## Current Limitations ⚠️
 
-- `cli` entries are the only entries that support quota monitoring, `watch`, `select`, `sync-current`, and `relogin`.
+- `cli` entries are the only entries that support quota monitoring, `watch`, `select`, `sync-current`, `refresh`, and `relogin`.
 - `token` entries are simple SDK credentials only.
 - The tool does not auto-refresh OAuth tokens.
 - The implementation depends on Claude's current local auth layout.

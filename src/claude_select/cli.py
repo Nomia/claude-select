@@ -272,6 +272,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a JSON object instead of plain text.",
     )
 
+    refresh = subparsers.add_parser(
+        "refresh",
+        help="Try to refresh expired or expiring CLI accounts via `claude -p`.",
+        description=(
+            "For each target CLI alias, write its stored snapshot into Claude's live auth state,\n"
+            "run a lightweight `claude -p` probe to let Claude refresh the session if possible,\n"
+            "then sync the live state back into the local registry."
+        ),
+        epilog="Examples:\n  claude-select refresh\n  claude-select refresh work",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    refresh.add_argument(
+        "alias",
+        nargs="?",
+        help=(
+            "Specific CLI alias to refresh. If omitted, refresh all expired or "
+            "expiring CLI aliases."
+        ),
+    )
+
     return parser
 
 
@@ -363,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
                     print("Current registry:")
                     print(manager.render_table())
             return 0
+        if args.command == "refresh":
+            return _run_refresh(manager, alias=args.alias)
     except ClaudeSelectError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -405,6 +427,24 @@ def _print_capture_feedback(manager: AuthManager, account: dict[str, Any], *, ve
     print()
     print("Current registry:")
     print(manager.render_table())
+
+
+def _run_refresh(manager: AuthManager, *, alias: str | None) -> int:
+    """Refresh one or more CLI accounts via `claude -p` and sync-current."""
+    targets = [alias] if alias else manager.refresh_candidates()
+    if not targets:
+        print("No CLI accounts currently need refresh.")
+        return 0
+    for target in targets:
+        payload = manager.refresh_account(target)
+        print(f"Refreshed {payload['alias']} via `claude -p`.")
+        if payload["probe_output"]:
+            print(f"Probe output: {payload['probe_output']}")
+        print(payload["sync"]["message"])
+        print()
+    print("Current registry:")
+    print(manager.render_table())
+    return 0
 
 
 def _best_effort_sync_current(manager: AuthManager) -> dict[str, Any] | None:
@@ -542,10 +582,45 @@ def _run_watch(
 
 def _build_watch_renderable(manager: AuthManager, *, include_usage: bool) -> Group:
     """Build the live watch layout."""
-    return Group(
+    renderables: list[Panel | Table] = [
         _build_current_account_panel(manager),
         _build_accounts_table(manager, include_usage=include_usage),
-    )
+    ]
+    hint_panel = _build_watch_hint_panel(manager)
+    if hint_panel is not None:
+        renderables.append(hint_panel)
+    return Group(*renderables)
+
+
+def _build_watch_hint_panel(manager: AuthManager) -> Panel | None:
+    """Render a next-step hint panel for expiring or expired CLI accounts."""
+    rows = manager.list_accounts(include_usage=False)
+    managed_rows = [
+        row for row in rows if "cli" in str(row.get("kind_label") or row["auth_kind"]).lower()
+    ]
+    expired_aliases = [row["alias"] for row in managed_rows if row["status"] == "expired"]
+    if expired_aliases:
+        lines = [
+            "One or more CLI accounts have expired.",
+            "Fastest recovery:",
+        ]
+        if len(expired_aliases) == 1:
+            lines.append(f"Run: claude-select refresh {expired_aliases[0]}")
+        else:
+            lines.append("Run: claude-select refresh")
+        lines.extend(
+            ["", "Fallback:", *[f"claude-select relogin {alias}" for alias in expired_aliases]]
+        )
+        return Panel("\n".join(lines), title="Action recommended", expand=True)
+
+    expiring_aliases = [row["alias"] for row in managed_rows if row["status"] == "expiring_soon"]
+    if expiring_aliases:
+        lines = ["Some CLI accounts are close to expiry."]
+        for alias in expiring_aliases:
+            lines.append(f"Recommended: claude-select refresh {alias}")
+        return Panel("\n".join(lines), title="Heads up", expand=True)
+
+    return None
 
 
 def _build_current_account_panel(manager: AuthManager) -> Panel:

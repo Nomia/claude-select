@@ -199,6 +199,24 @@ class ClaudeAuthBackend:
         subprocess.run([claude_path, "auth", "login"], check=False)
         return True
 
+    def run_print_prompt(self, prompt: str) -> tuple[bool, str]:
+        """Run `claude -p <prompt>` and return whether it succeeded."""
+        claude_path = shutil.which("claude")
+        if not claude_path:
+            return False, "`claude` was not found in PATH."
+        result = subprocess.run(
+            [claude_path, "-p", prompt],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        if result.returncode != 0:
+            if not output:
+                output = f"`claude -p` exited with status {result.returncode}."
+            return False, output
+        return True, output
+
     def read_auth_status(self) -> dict[str, Any] | None:
         """Return structured `claude auth status` output when available."""
         claude_path = shutil.which("claude")
