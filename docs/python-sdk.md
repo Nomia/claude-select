@@ -1,11 +1,16 @@
 # Python SDK Guide
 
-`claude-select` exposes a small Python surface on purpose. The SDK side is meant to do one job well:
+`claude-select` exposes a small Python surface on purpose. The SDK side does two jobs:
 
-- read one stored Claude auth snapshot from the local registry
+- read one stored registry entry by alias
 - convert it into an `env` mapping for Claude Agent SDK usage
 
-It does not mutate Claude's active CLI login state unless you explicitly call CLI-side selection.
+There are two registry entry kinds:
+
+- `cli` entries: captured from Claude CLI `/login`; these support quota, watch, select, and sync flows
+- `token` entries: captured from `claude setup-token`; these are simple long-lived SDK credentials only
+
+Long-lived `token` entries are **not** used for quota-aware auto-selection, quota monitoring, or CLI account switching.
 
 ## Install
 
@@ -15,7 +20,7 @@ pip install claude-select
 
 ## Prerequisite
 
-Before Python can use an account, that account must already exist in the local registry.
+Before Python can use an alias, that alias must already exist in the local registry.
 
 Typical bootstrap:
 
@@ -23,17 +28,14 @@ Typical bootstrap:
 claude-select init
 ```
 
-or:
+Or capture things one by one:
 
 ```bash
 claude-select add work
 claude-select add-token work-sdk
 ```
 
-`add-token` launches `claude setup-token`, tries to detect the token from the
-terminal output, validates it, and then resolves the token's email and
-organization automatically. Manual prompts only appear if token detection or
-metadata detection fails.
+`add-token` launches `claude setup-token`, tries to detect the token from the terminal output, and stores it as a simple SDK/program credential. Because official long-lived tokens are inference-only, profile metadata detection is best-effort and may fall back to manual prompts.
 
 ## Minimal usage
 
@@ -43,7 +45,6 @@ from claude_code_sdk import ClaudeAgentOptions, query
 
 manager = AuthManager()
 env = manager.build_sdk_env("work")
-auto_env = manager.build_sdk_env_auto()
 
 options = ClaudeAgentOptions(env=env)
 
@@ -51,9 +52,18 @@ async for message in query(prompt="summarize this repository", options=options):
     print(message)
 ```
 
+To use a long-lived token entry explicitly:
+
+```python
+from claude_select import AuthManager
+
+manager = AuthManager()
+env = manager.build_sdk_env("work-sdk")
+```
+
 ## What `build_sdk_env()` returns
 
-For an OAuth-backed account, `build_sdk_env(alias)` returns a clean environment mapping that includes:
+For both `cli` and `token` entries, `build_sdk_env(alias)` returns a clean environment mapping that includes:
 
 - `CLAUDE_CODE_OAUTH_TOKEN`
 - `CLAUDE_CODE_OAUTH_SCOPES` when scopes are present
@@ -66,13 +76,11 @@ It also removes conflicting auth variables such as:
 - `CLAUDE_CODE_USE_VERTEX`
 - `CLAUDE_CODE_USE_FOUNDRY`
 
-This keeps one Python call bound to one stored account snapshot.
-
-For long-lived token entries captured through `claude-select add-token`, the same method returns `CLAUDE_CODE_OAUTH_TOKEN`, but the underlying entry is a one-year token intended for SDK/program use rather than CLI account switching.
+This keeps one Python call bound to one stored account or token entry.
 
 ## Common patterns
 
-### 1. Inspect available accounts
+### 1. Inspect available entries
 
 ```python
 from claude_select import AuthManager
@@ -80,10 +88,10 @@ from claude_select import AuthManager
 manager = AuthManager()
 
 for account in manager.list_accounts():
-    print(account["alias"], account["email"], account["status"])
+    print(account["alias"], account["auth_kind"], account["email"], account["status"])
 ```
 
-### 2. Get one account's metadata
+### 2. Get one entry's metadata
 
 ```python
 details = manager.get_account("work")
@@ -98,7 +106,7 @@ payload = manager.export_sdk_auth("work")
 print(payload["credentials"])
 ```
 
-### 4. Read quota for the current live account
+### 4. Read quota for the current live CLI account
 
 ```python
 quota = manager.get_live_quota()
@@ -107,7 +115,7 @@ print(quota["quota_5h_left"], quota["quota_5h_reset"])
 print(quota["quota_7d_left"], quota["quota_7d_reset"])
 ```
 
-### 5. Read quota for one stored account
+### 5. Read quota for one stored CLI account
 
 ```python
 quota = manager.get_account_quota("work")
@@ -116,7 +124,9 @@ print(quota["five_hour"])
 print(quota["seven_day"])
 ```
 
-### 6. Read quota for every stored account
+For `token` entries created through `add-token`, quota is not available and the response will report `available=False` plus `n/a` quota fields.
+
+### 6. Read quota for every stored entry
 
 ```python
 for quota in manager.list_account_quotas():
@@ -125,42 +135,24 @@ for quota in manager.list_account_quotas():
 
 Quota data is cached locally for 60 seconds. This keeps `watch` and repeated SDK reads from hitting the remote usage endpoint on every render.
 
-### 7. Auto-pick the best long-lived token
+## Unsupported auto-selection
+
+`build_sdk_env_auto()` and `pick_sdk_account()` remain importable for compatibility with older releases, but they now raise `AccountSelectionError`.
+
+Why: long-lived `claude setup-token` tokens are inference-only and do not expose the profile/quota data needed for reliable quota-aware token rotation.
+
+Use explicit aliases instead:
 
 ```python
-env = manager.build_sdk_env_auto()
-```
-
-This only considers `token` entries. It checks cached 5h / 7d usage and picks the best available long-lived token before returning an env mapping.
-
-This decision happens when your program asks for an env mapping, so the practical trigger is "right before a Claude Agent SDK call." It does not run in the background, and it does not switch tokens in the middle of an already-running request.
-
-Current rules:
-
-- only `token` entries participate
-- any token already at `100%` on its 5h or 7d window is skipped
-- among the remaining tokens, the one with the most 5h quota left wins first, then the most 7d quota left
-- usage is cached locally for 60 seconds
-
-Typical pattern:
-
-```python
-from claude_select import AuthManager
-from claude_code_sdk import ClaudeAgentOptions, query
-
-manager = AuthManager()
-env = manager.build_sdk_env_auto()
-options = ClaudeAgentOptions(env=env)
-
-async for message in query(prompt="summarize this repository", options=options):
-    print(message)
+env = manager.build_sdk_env("work")
+env = manager.build_sdk_env("work-sdk")
 ```
 
 ## Expiry behavior
 
 The SDK side does not refresh tokens automatically.
 
-If an account is expired:
+If a `cli` entry is expired:
 
 - `build_sdk_env()` raises an error
 - `export_sdk_auth()` raises an error
@@ -171,13 +163,14 @@ Recovery flow:
 claude-select relogin work
 ```
 
-Then call `build_sdk_env("work")` again.
+A long-lived `token` entry does not participate in `relogin`; record a new one with `add-token` if you want to rotate it manually.
 
 ## Recommended usage model
 
 Use `claude-select` like this:
 
 - CLI users: `claude-select select work`
-- Python users: `AuthManager().build_sdk_env("work")`
+- Python users with login snapshots: `AuthManager().build_sdk_env("work")`
+- Python users with long-lived tokens: `AuthManager().build_sdk_env("work-sdk")`
 
 Both flows share the same local registry, but only CLI selection mutates Claude's active live auth state.

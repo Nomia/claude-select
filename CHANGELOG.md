@@ -6,6 +6,21 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-12
+
+### Added
+
+- Added `--version` to the CLI.
+- Improved `add-token` terminal capture to support wrapped `claude setup-token` output lines.
+
+### Changed
+
+- Repositioned long-lived `add-token` entries as simple SDK/program credentials only.
+- Removed quota-aware SDK token auto-selection from the supported feature set; compatibility helpers now raise `AccountSelectionError`.
+- `list --usage`, Python quota APIs, and watch-style quota views now report `n/a` / unsupported for `token` entries instead of pretending quota is available.
+- Improved `add-token` probing so scope-limited inference tokens are treated as valid SDK credentials even when profile metadata cannot be read.
+- Rewrote English and Chinese README / Python SDK docs around the simplified model: `cli` entries are fully managed, `token` entries are explicit SDK credentials.
+
 ## [0.3.1] - 2026-05-12
 
 ### Added

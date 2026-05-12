@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from claude_select import cli
 from claude_select.exceptions import ClaudeSelectError
 from claude_select.manager import AuthManager
@@ -142,7 +144,7 @@ def test_cli_add_token(monkeypatch, capsys, registry, fake_auth_backend, fake_us
 
     output = capsys.readouterr().out
     assert "Detected the long-lived token from setup-token output." in output
-    assert "Validated token successfully." in output
+    assert "Validated token for SDK/program use." in output
     assert "Detected account metadata:" in output
     assert "email: sdk@example.com" in output
     assert "[token] work-sdk <sdk@example.com> [SDK Org]." in output
@@ -224,6 +226,12 @@ def test_extract_token_from_output():
     assert cli._extract_token_from_output(output) == "sk-ant-oat01-abc_DEF-123"
 
 
+def test_extract_token_from_output_multiline():
+    output = "Your OAuth token:\n\nsk-ant-oat01-abc_DEF-\n123-XYZ\n\nStore this token securely.\n"
+
+    assert cli._extract_token_from_output(output) == "sk-ant-oat01-abc_DEF-123-XYZ"
+
+
 def test_extract_token_from_output_missing():
     assert cli._extract_token_from_output("no token here") is None
 
@@ -249,6 +257,54 @@ def test_run_setup_token_without_launch(capsys):
 
     assert output == ""
     assert "Run `claude setup-token`, copy the token, then return here." in capsys.readouterr().out
+
+
+def test_run_setup_token_with_launch(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/bin/claude")
+    observed: list[list[str]] = []
+    monkeypatch.setattr(
+        cli,
+        "_stream_and_capture_command",
+        lambda command: observed.append(command) or "captured-output",
+    )
+
+    output = cli._run_setup_token(True)
+
+    assert output == "captured-output"
+    assert observed == [["/usr/bin/claude", "setup-token"]]
+    text = capsys.readouterr().out
+    assert "Launching `claude setup-token` in this terminal." in text
+
+
+def test_prompt_for_token_capture_scope_limited(
+    monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    monkeypatch.setattr(cli, "_run_setup_token", lambda _launch: "sk-ant-oat01-abc\nDEF\n")
+    monkeypatch.setattr(
+        manager,
+        "probe_token",
+        lambda _token: {
+            "valid": True,
+            "metadata": {},
+            "error": None,
+            "warning": "Profile metadata is unavailable for this token scope.",
+        },
+    )
+    answers = iter(["sdk@example.com", "SDK Org"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+    payload = cli._prompt_for_token_capture(manager, launch=True)
+
+    assert payload["token"] == "sk-ant-oat01-abcDEF"
+    assert payload["email"] == "sdk@example.com"
+    output = capsys.readouterr().out
+    assert "Validated token for SDK/program use." in output
+    assert "Profile metadata is unavailable for this token scope." in output
 
 
 def test_build_panels_for_empty_and_error_state(
@@ -352,6 +408,16 @@ def test_cli_help_texts(capsys):
     assert "Show the current Claude live auth state." in output
 
 
+def test_cli_version(capsys):
+    try:
+        cli.main(["--version"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    output = capsys.readouterr().out
+    assert output.startswith("claude-select ")
+
+
 def test_cli_whoami(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
@@ -409,6 +475,33 @@ def test_cli_list_with_usage(monkeypatch, capsys, registry, fake_auth_backend, f
     assert "5h Left" in output
     assert "76.0%" in output
     assert manager.get_account("work").record.expires_at == 4102448400000
+
+
+def test_wait_for_login_and_choose_alias_edge_cases(
+    monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+
+    with pytest.raises(ClaudeSelectError):
+        manager.choose_alias_interactively()
+
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+    manager.wait_for_login(True)
+    manager.wait_for_login(False)
+
+    manager.add_token_account("work-sdk", "token", email="sdk@example.com")
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "work-sdk")
+    with pytest.raises(ClaudeSelectError):
+        manager.choose_alias_interactively()
+
+    text = capsys.readouterr().out
+    assert "`claude` was not found in PATH." in text
+    assert "Run `claude` in another shell" in text
 
 
 def test_cli_export_env_plain_and_setup_token_guidance(monkeypatch, capsys):

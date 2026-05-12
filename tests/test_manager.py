@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import urllib.error
 
@@ -148,6 +149,7 @@ def test_probe_token_success(registry, fake_auth_backend, fake_usage_provider):
     assert payload["valid"] is True
     assert payload["metadata"]["email"] == "sdk@example.com"
     assert payload["error"] is None
+    assert payload["warning"] is None
 
 
 def test_probe_token_failure(registry, fake_auth_backend, fake_usage_provider):
@@ -163,6 +165,60 @@ def test_probe_token_failure(registry, fake_auth_backend, fake_usage_provider):
     assert payload["valid"] is False
     assert payload["metadata"] == {}
     assert payload["error"] == "boom"
+    assert payload["warning"] is None
+
+
+def test_probe_token_scope_limited_but_valid(registry, fake_auth_backend, fake_usage_provider):
+    message = (
+        b'{"error":{"message":"OAuth token does not meet scope requirement '
+        b'any_of(user:profile, user:office)"}}'
+    )
+    body = io.BytesIO(message)
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+        token_metadata_fetcher=lambda _token: (_ for _ in ()).throw(
+            urllib.error.HTTPError(
+                url="https://api.anthropic.com/api/oauth/profile",
+                code=403,
+                msg="Forbidden",
+                hdrs=None,
+                fp=body,
+            )
+        ),
+    )
+
+    payload = manager.probe_token("long-lived-token")
+
+    assert payload["valid"] is True
+    assert payload["metadata"] == {}
+    assert payload["error"] is None
+    assert payload["warning"] == "Profile metadata is unavailable for this token scope."
+
+
+def test_probe_token_http_error_non_403(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+        token_metadata_fetcher=lambda _token: (_ for _ in ()).throw(
+            urllib.error.HTTPError(
+                url="https://api.anthropic.com/api/oauth/profile",
+                code=401,
+                msg="Unauthorized",
+                hdrs=None,
+                fp=io.BytesIO(b"unauthorized"),
+            )
+        ),
+    )
+
+    payload = manager.probe_token("long-lived-token")
+
+    assert payload["valid"] is False
+    assert payload["metadata"] == {}
+    assert "401" in payload["error"]
+    assert payload["warning"] is None
 
 
 def test_fetch_token_metadata_and_normalize_nested_payload(
@@ -239,6 +295,18 @@ def test_fetch_token_metadata_tries_multiple_urls(
     assert len(calls) == 2
 
 
+def test_normalize_token_metadata_with_invalid_shape(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+
+    assert manager._normalize_token_metadata([]) == {}
+
+
 class AliasUsageProvider:
     def __init__(self, by_alias: dict[str, dict[str, float]]):
         self.by_alias = by_alias
@@ -282,85 +350,31 @@ def test_add_token_account_validates_inputs(registry, fake_auth_backend, fake_us
         manager.add_token_account("bad-sdk", "token", email="   ")
 
 
-def test_pick_sdk_account_and_build_sdk_env_auto(registry, fake_auth_backend):
-    usage_provider = AliasUsageProvider(
-        {
-            "alias:work-sdk-a": {"five_hour": 100.0, "seven_day": 40.0},
-            "alias:work-sdk-b": {"five_hour": 25.0, "seven_day": 30.0},
-        }
-    )
+def test_sdk_auto_selection_is_not_supported(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
         auth_backend=fake_auth_backend,
-        usage_provider=usage_provider,
+        usage_provider=fake_usage_provider,
     )
-    manager.add_token_account("work-sdk-a", "token-a", email="a@example.com")
-    manager.add_token_account("work-sdk-b", "token-b", email="b@example.com")
-
-    selected = manager.pick_sdk_account()
-    env = manager.build_sdk_env_auto(base_env={"PATH": "/bin"})
-
-    assert selected["alias"] == "work-sdk-b"
-    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "token-b"
-    assert env["CLAUDE_SELECT_ALIAS"] == "work-sdk-b"
-    assert env["PATH"] == "/bin"
-
-
-def test_pick_sdk_account_prefers_requested_alias_when_available(registry, fake_auth_backend):
-    usage_provider = AliasUsageProvider(
-        {
-            "alias:work-sdk-a": {"five_hour": 10.0, "seven_day": 20.0},
-            "alias:work-sdk-b": {"five_hour": 5.0, "seven_day": 10.0},
-        }
-    )
-    manager = AuthManager(
-        registry=registry,
-        auth_backend=fake_auth_backend,
-        usage_provider=usage_provider,
-    )
-    manager.add_token_account("work-sdk-a", "token-a", email="a@example.com")
-    manager.add_token_account("work-sdk-b", "token-b", email="b@example.com")
-
-    selected = manager.pick_sdk_account(preferred_alias="work-sdk-a")
-
-    assert selected["alias"] == "work-sdk-a"
-
-
-def test_pick_sdk_account_fails_without_available_tokens(registry, fake_auth_backend):
-    usage_provider = AliasUsageProvider(
-        {
-            "alias:work-sdk-a": {"five_hour": 100.0, "seven_day": 100.0},
-        }
-    )
-    manager = AuthManager(
-        registry=registry,
-        auth_backend=fake_auth_backend,
-        usage_provider=usage_provider,
-    )
-    manager.add_token_account("work-sdk-a", "token-a", email="a@example.com")
+    manager.add_token_account("work-sdk", "token-a", email="a@example.com")
 
     with pytest.raises(AccountSelectionError):
         manager.pick_sdk_account()
 
+    with pytest.raises(AccountSelectionError):
+        manager.build_sdk_env_auto()
 
-def test_build_sdk_env_auto_helper_uses_registry(registry, fake_auth_backend, monkeypatch):
-    usage_provider = AliasUsageProvider(
-        {
-            "alias:work-sdk-a": {"five_hour": 25.0, "seven_day": 25.0},
-        }
-    )
+
+def test_build_sdk_env_auto_helper_is_not_supported(registry, fake_auth_backend, monkeypatch):
     manager = AuthManager(
         registry=registry,
         auth_backend=fake_auth_backend,
-        usage_provider=usage_provider,
     )
-    manager.add_token_account("work-sdk-a", "token-a", email="a@example.com")
+    manager.add_token_account("work-sdk", "token-a", email="a@example.com")
     monkeypatch.setattr("claude_select.manager.AuthManager", lambda: manager)
 
-    env = build_sdk_env_auto()
-
-    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "token-a"
-    assert env["CLAUDE_SELECT_ALIAS"] == "work-sdk-a"
+    with pytest.raises(AccountSelectionError):
+        build_sdk_env_auto()
 
 
 def test_expired_account_rejected(registry, fake_auth_backend, fake_usage_provider):
@@ -507,6 +521,24 @@ def test_list_accounts_with_usage(registry, fake_auth_backend, fake_usage_provid
     assert rows[0]["quota_5h_left"] == "76.0%"
     assert rows[0]["quota_7d_left"] == "59.0%"
     assert rows[0]["auth_kind"] == "cli_snapshot"
+
+
+def test_token_entries_show_na_usage(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.add_token_account("work-sdk", "token-a", email="sdk@example.com")
+
+    rows = manager.list_accounts(include_usage=True)
+    quota = manager.get_account_quota("work-sdk")
+
+    assert rows[0]["quota_5h_left"] == "n/a"
+    assert rows[0]["quota_7d_reset"] == "n/a"
+    assert quota["available"] is False
+    assert quota["quota_5h_left"] == "n/a"
+    assert "unsupported" in quota["error"]
 
 
 def test_get_live_quota(registry, fake_auth_backend, fake_usage_provider):

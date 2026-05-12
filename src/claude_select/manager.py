@@ -85,12 +85,19 @@ class AuthManager:
             payload["status"] = record.status(now)
             payload["expires_in"] = record.expires_in(now)
             if include_usage:
-                usage = self._usage_for_alias(record.alias)
-                payload["usage"] = usage
-                payload["quota_5h_left"] = self._format_window_remaining(usage, "five_hour")
-                payload["quota_5h_reset"] = self._format_window_reset(usage, "five_hour")
-                payload["quota_7d_left"] = self._format_window_remaining(usage, "seven_day")
-                payload["quota_7d_reset"] = self._format_window_reset(usage, "seven_day")
+                if record.auth_kind == AUTH_KIND_TOKEN:
+                    payload["usage"] = None
+                    payload["quota_5h_left"] = "n/a"
+                    payload["quota_5h_reset"] = "n/a"
+                    payload["quota_7d_left"] = "n/a"
+                    payload["quota_7d_reset"] = "n/a"
+                else:
+                    usage = self._usage_for_alias(record.alias)
+                    payload["usage"] = usage
+                    payload["quota_5h_left"] = self._format_window_remaining(usage, "five_hour")
+                    payload["quota_5h_reset"] = self._format_window_reset(usage, "five_hour")
+                    payload["quota_7d_left"] = self._format_window_remaining(usage, "seven_day")
+                    payload["quota_7d_reset"] = self._format_window_reset(usage, "seven_day")
             rows.append(payload)
         return rows
 
@@ -167,16 +174,38 @@ class AuthManager:
             raise AccountSelectionError("Token cannot be empty.")
         try:
             raw = self.token_metadata_fetcher(normalized_token)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 403:
+                reason = self._extract_http_error_reason(exc)
+                warning = (
+                    "Profile metadata is unavailable for this token scope."
+                    if "scope requirement" in reason.lower()
+                    else "Profile metadata could not be read for this token."
+                )
+                return {
+                    "valid": True,
+                    "metadata": {},
+                    "error": None,
+                    "warning": warning,
+                }
+            return {
+                "valid": False,
+                "metadata": {},
+                "error": str(exc),
+                "warning": None,
+            }
         except Exception as exc:
             return {
                 "valid": False,
                 "metadata": {},
                 "error": str(exc),
+                "warning": None,
             }
         return {
             "valid": True,
             "metadata": self._normalize_token_metadata(raw),
             "error": None,
+            "warning": None,
         }
 
     def relogin_account(self, alias: str) -> dict[str, Any]:
@@ -289,55 +318,24 @@ class AuthManager:
         self,
         preferred_alias: str | None = None,
     ) -> dict[str, Any]:
-        """Pick the best token entry for SDK/program usage based on quota availability."""
-        candidates = [
-            row
-            for row in self.list_accounts(include_usage=True)
-            if row["auth_kind"] == AUTH_KIND_TOKEN
-        ]
-        if not candidates:
-            raise AccountSelectionError("No token entries are available for SDK auto-selection.")
-
-        preferred: dict[str, Any] | None = None
-        if preferred_alias is not None:
-            normalized = self._normalize_alias(preferred_alias)
-            preferred = next((row for row in candidates if row["alias"] == normalized), None)
-            if preferred is None:
-                raise AccountSelectionError(
-                    f"Preferred SDK alias '{normalized}' is not a token entry."
-                )
-
-        ranked = [row for row in candidates if self._sdk_candidate_available(row)]
-        ranked.sort(key=self._sdk_candidate_sort_key, reverse=True)
-
-        if preferred and self._sdk_candidate_available(preferred):
-            chosen = preferred
-        elif ranked:
-            chosen = ranked[0]
-        else:
-            raise AccountSelectionError(
-                "No token entries currently have quota available for SDK auto-selection."
-            )
-
-        quota = self.get_account_quota(chosen["alias"])
-        return {
-            "alias": chosen["alias"],
-            "email": chosen["email"],
-            "organization_name": chosen["organization_name"],
-            "auth_kind": chosen["auth_kind"],
-            "quota": quota,
-        }
+        """Deprecated quota-aware token auto-selection."""
+        raise AccountSelectionError(
+            "Quota-aware SDK auto-selection is not supported for long-lived token entries. "
+            "Choose an alias explicitly with build_sdk_env(alias)."
+        )
 
     def build_sdk_env_auto(
         self,
         preferred_alias: str | None = None,
         base_env: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        """Pick an SDK token entry automatically, then build an env mapping for it."""
-        selected = self.pick_sdk_account(preferred_alias=preferred_alias)
-        env = self.build_sdk_env(selected["alias"], base_env=base_env)
-        env["CLAUDE_SELECT_ALIAS"] = selected["alias"]
-        return env
+        """Deprecated quota-aware token auto-selection."""
+        _ = preferred_alias
+        _ = base_env
+        raise AccountSelectionError(
+            "Quota-aware SDK auto-selection is not supported for long-lived token entries. "
+            "Choose an alias explicitly with build_sdk_env(alias)."
+        )
 
     def export_sdk_auth(self, alias: str) -> dict[str, Any]:
         """Return a structured auth payload for SDK consumers."""
@@ -407,6 +405,19 @@ class AuthManager:
     def get_account_quota(self, alias: str) -> dict[str, Any]:
         """Return quota details for one stored account alias."""
         details = self.registry.get_account(self._normalize_alias(alias))
+        if details.record.auth_kind == AUTH_KIND_TOKEN:
+            return self._quota_payload(
+                alias=details.record.alias,
+                email=details.record.email,
+                organization_name=details.record.organization_name,
+                organization_id=details.record.organization_id,
+                account_uuid=details.record.account_uuid,
+                status=details.record.status(),
+                expires_at=details.record.expires_at,
+                expires_in=details.record.expires_in(),
+                usage=None,
+                unsupported_reason="quota unsupported for long-lived token entries",
+            )
         usage = self._usage_for_alias(details.record.alias)
         return self._quota_payload(
             alias=details.record.alias,
@@ -612,6 +623,28 @@ class AuthManager:
         raise AccountSelectionError("Unable to resolve token metadata.")
 
     @staticmethod
+    def _extract_http_error_reason(exc: urllib.error.HTTPError) -> str:
+        try:
+            payload = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            return str(exc)
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return payload or str(exc)
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if isinstance(message, str) and message.strip():
+                return message
+        if isinstance(error, str) and error.strip():
+            return error
+        message = parsed.get("message")
+        if isinstance(message, str) and message.strip():
+            return message
+        return payload or str(exc)
+
+    @staticmethod
     def _normalize_token_metadata(raw: dict[str, Any]) -> dict[str, str]:
         if not isinstance(raw, dict):
             return {}
@@ -805,7 +838,31 @@ class AuthManager:
         expires_at: int | None,
         expires_in: str,
         usage: dict[str, Any] | None,
+        unsupported_reason: str | None = None,
     ) -> dict[str, Any]:
+        if unsupported_reason:
+            return {
+                "alias": alias,
+                "email": email,
+                "organization_name": organization_name,
+                "organization_id": organization_id,
+                "account_uuid": account_uuid,
+                "status": status,
+                "expires_at": expires_at,
+                "expires_in": expires_in,
+                "available": False,
+                "stale": False,
+                "error": unsupported_reason,
+                "five_hour": None,
+                "seven_day": None,
+                "seven_day_opus": None,
+                "extra_usage": None,
+                "fetched_at": None,
+                "quota_5h_left": "n/a",
+                "quota_5h_reset": "n/a",
+                "quota_7d_left": "n/a",
+                "quota_7d_reset": "n/a",
+            }
         return {
             "alias": alias,
             "email": email,

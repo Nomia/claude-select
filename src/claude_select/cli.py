@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from rich.console import Console, Group
@@ -40,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
             "  4. Use AuthManager().build_sdk_env('work') in Python"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_package_version()}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -92,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  claude-select add-token work-sdk\n"
-            "  claude-select add-token ci-bot --no-launch"
+            "  claude-select add-token local-bot --no-launch"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -390,7 +396,9 @@ def _prompt_for_token_capture(manager: AuthManager, *, launch: bool) -> dict[str
 
     probe = manager.probe_token(token)
     if probe["valid"]:
-        print("Validated token successfully.")
+        print("Validated token for SDK/program use.")
+        if probe.get("warning"):
+            print(probe["warning"])
     else:
         print("Could not validate the token automatically.")
         if probe["error"]:
@@ -452,10 +460,29 @@ def _stream_and_capture_command(command: list[str]) -> str:
 
 def _extract_token_from_output(output: str) -> str | None:
     """Best-effort token extraction from `claude setup-token` terminal output."""
-    match = TOKEN_RE.search(output)
-    if not match:
-        return None
-    return match.group(1)
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
+        match = TOKEN_RE.search(line)
+        if not match:
+            continue
+        token = match.group(1)
+        follow_index = index + 1
+        while follow_index < len(lines):
+            chunk = lines[follow_index].strip()
+            if not chunk or not re.fullmatch(r"[0-9A-Za-z._-]+", chunk):
+                break
+            token += chunk
+            follow_index += 1
+        return token
+    return None
+
+
+def _package_version() -> str:
+    """Read the installed package version for --version output."""
+    try:
+        return version("claude-select")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def _run_watch(manager: AuthManager, interval: int, sync_interval: int, iterations: int) -> int:
