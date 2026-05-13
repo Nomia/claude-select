@@ -92,6 +92,41 @@ def test_cli_export_env_plain(
     assert "CLAUDE_CODE_OAUTH_TOKEN=access-1" in output
 
 
+def test_cli_usage_plain(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    monkeypatch.setattr(cli, "AuthManager", lambda: manager)
+
+    assert cli.main(["usage", "work"]) == 0
+
+    output = capsys.readouterr().out
+    assert "alias: work" in output
+    assert "email: work@example.com" in output
+    assert "5h left: 76.0%" in output
+    assert "7d left: 59.0%" in output
+
+
+def test_cli_usage_json(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    monkeypatch.setattr(cli, "AuthManager", lambda: manager)
+
+    assert cli.main(["usage", "work", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["alias"] == "work"
+    assert payload["quota_5h_left"] == "76.0%"
+    assert payload["quota_7d_left"] == "59.0%"
+
+
 def test_cli_add_relogin_remove_current_plain(
     monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider
 ):

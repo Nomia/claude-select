@@ -241,6 +241,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a JSON object instead of KEY=value lines.",
     )
 
+    usage = subparsers.add_parser(
+        "usage",
+        help="Show quota usage for one stored account.",
+        description=(
+            "Read one stored alias from the local registry and display its current\n"
+            "5h / 7d quota usage, reset times, and cache freshness."
+        ),
+        epilog="Examples:\n  claude-select usage work\n  claude-select usage work --json",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    usage.add_argument("alias", help="Alias to inspect.")
+    usage.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Print a JSON object instead of plain text.",
+    )
+
     current = subparsers.add_parser(
         "current",
         aliases=["cur"],
@@ -397,6 +415,13 @@ def main(argv: list[str] | None = None) -> int:
                 for key, value in sorted(env.items()):
                     print(f"{key}={value}")
             return 0
+        if args.command == "usage":
+            quota_payload = manager.get_account_quota(args.alias)
+            if args.as_json:
+                print(json.dumps(quota_payload, indent=2, sort_keys=True))
+            else:
+                print(_render_account_usage(quota_payload))
+            return 0
         if args.command in {"current", "cur"}:
             payload: dict[str, Any] = {"current_alias": manager.current_alias()}
             if args.as_json:
@@ -468,6 +493,28 @@ def _print_capture_feedback(manager: AuthManager, account: dict[str, Any], *, ve
     print()
     print("Current registry:")
     print(manager.render_table())
+
+
+def _render_account_usage(payload: dict[str, Any]) -> str:
+    """Render one account's quota usage as plain text."""
+    lines = [
+        f"alias: {payload.get('alias') or '-'}",
+        f"email: {payload.get('email') or '-'}",
+        f"organization: {payload.get('organization_name') or '-'}",
+        f"status: {payload.get('status') or '-'}",
+        f"expires in: {payload.get('expires_in') or '-'}",
+        f"available: {'yes' if payload.get('available') else 'no'}",
+        f"stale: {'yes' if payload.get('stale') else 'no'}",
+        f"fetched at: {payload.get('fetched_at') or '-'}",
+        f"5h left: {payload.get('quota_5h_left') or '-'}",
+        f"5h reset: {payload.get('quota_5h_reset') or '-'}",
+        f"7d left: {payload.get('quota_7d_left') or '-'}",
+        f"7d reset: {payload.get('quota_7d_reset') or '-'}",
+    ]
+    error = payload.get("error")
+    if error:
+        lines.append(f"error: {error}")
+    return "\n".join(lines)
 
 
 def _run_refresh(manager: AuthManager, *, alias: str | None) -> int:
