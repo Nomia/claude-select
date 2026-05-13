@@ -89,20 +89,26 @@ manager = AuthManager()
 
 for account in manager.list_accounts():
     print(account["alias"], account["auth_kind"], account["email"], account["status"])
+
+for account in manager.list_accounts(include_usage=True, auto_refresh=True):
+    print(account["alias"], account["quota_5h_left"], account["quota_7d_left"])
 ```
 
 ### 2. 读取某个条目的元数据
 
 ```python
-details = manager.get_account("work")
+details = manager.get_account("work", auto_refresh=True)
 print(details.record.email)
 print(details.record.expires_at)
+
+summary = manager.get_account_summary("work", include_usage=True, auto_refresh=True)
+print(summary["quota_5h_left"], summary["quota_7d_left"])
 ```
 
 ### 3. 导出原始认证数据
 
 ```python
-payload = manager.export_sdk_auth("work")
+payload = manager.export_sdk_auth("work", auto_refresh=True)
 print(payload["credentials"])
 ```
 
@@ -118,7 +124,7 @@ print(quota["quota_7d_left"], quota["quota_7d_reset"])
 ### 5. 读取某个已保存 CLI 账号的 quota
 
 ```python
-quota = manager.get_account_quota("work")
+quota = manager.get_account_quota("work", auto_refresh=True)
 print(quota["available"])
 print(quota["five_hour"])
 print(quota["seven_day"])
@@ -133,7 +139,50 @@ for quota in manager.list_account_quotas():
     print(quota["alias"], quota["quota_5h_left"], quota["quota_7d_left"])
 ```
 
+### 7. 只拿当前仍可用的账号
+
+```python
+available = manager.list_available_accounts(include_usage=True, auto_refresh=True)
+for account in available:
+    print(account["alias"], account["status"], account["quota_5h_left"])
+
+picked = manager.pick_available_account(include_usage=True, auto_refresh=True)
+print("selected", picked["alias"])
+```
+
+当 `require_quota=True`（默认值）时，这个结果只会包含满足以下条件的 CLI alias：
+
+- 还没有 `expired`
+- quota 数据可读且不是 stale
+- 5 小时窗口和 7 天窗口都还有剩余额度
+
 quota 数据会在本地缓存 60 秒。这样 `watch` 和重复的 SDK 读取不会在每次渲染时都重新请求远端 usage 接口。
+
+## 给 Python 调用方的 `auto_refresh`
+
+下面这些公开方法支持 `auto_refresh=True`：
+
+- `list_accounts()`
+- `list_cli_accounts()`
+- `get_account()`
+- `get_account_summary()`
+- `build_sdk_env()`
+- `export_sdk_auth()`
+- `get_account_quota()`
+- `list_account_quotas()`
+- `list_available_accounts()`
+- `pick_available_account()`
+
+对 `cli` 类型 alias 来说，`auto_refresh=True` 的行为是：
+
+1. 如果该 alias 已过期或即将过期，先尝试一次轻量恢复。
+2. 这条恢复路径等价于：
+   - 先把该 alias 选成 Claude 当前 live auth state
+   - 执行一次 `claude -p "ping"`
+   - 再把刷新后的 live state 同步回本地 registry
+3. 如果这次恢复仍然失败，原方法会继续抛出它本来应该抛出的错误。
+
+这个参数默认关闭，因为它会修改 Claude 当前 live auth state，并且会发起一次真实的 Claude 请求。
 
 ## 不再支持自动选择
 

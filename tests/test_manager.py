@@ -11,9 +11,10 @@ from claude_select.exceptions import (
     AccountKindError,
     AccountSelectionError,
     AuthExpiredError,
+    ConfigError,
 )
-from claude_select.manager import AuthManager, build_sdk_env_auto
-from claude_select.models import AuthSnapshot
+from claude_select.manager import AuthManager, build_sdk_env, build_sdk_env_auto
+from claude_select.models import AUTH_KIND_CLI_SNAPSHOT, AuthSnapshot
 
 
 def test_capture_and_list_accounts(registry, fake_auth_backend, fake_usage_provider):
@@ -651,6 +652,24 @@ def test_list_accounts_with_usage(registry, fake_auth_backend, fake_usage_provid
     assert rows[0]["auth_kind"] == "cli_snapshot"
 
 
+def test_list_cli_and_token_accounts(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    manager.add_token_account("work-sdk", "token-a", email="sdk@example.com")
+
+    cli_rows = manager.list_cli_accounts(include_usage=True)
+    token_rows = manager.list_token_accounts(include_usage=True)
+
+    assert [row["alias"] for row in cli_rows] == ["work"]
+    assert cli_rows[0]["quota_5h_left"] == "76.0%"
+    assert [row["alias"] for row in token_rows] == ["work-sdk"]
+    assert token_rows[0]["quota_5h_left"] == "n/a"
+
+
 def test_token_entries_show_na_usage(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
@@ -667,6 +686,42 @@ def test_token_entries_show_na_usage(registry, fake_auth_backend, fake_usage_pro
     assert quota["available"] is False
     assert quota["quota_5h_left"] == "n/a"
     assert "unsupported" in quota["error"]
+
+
+def test_get_account_summary_and_current_account_summary(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    manager.select_account("work")
+
+    summary = manager.get_account_summary("work", include_usage=True)
+    current = manager.get_current_account_summary(include_usage=True)
+
+    assert summary["alias"] == "work"
+    assert summary["quota_5h_left"] == "76.0%"
+    assert current["alias"] == "work"
+    assert current["auth_method"] == "claude.ai"
+    assert current["quota_7d_left"] == "59.0%"
+
+
+def test_current_account_summary_without_usage(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+
+    current = manager.get_current_account_summary(include_usage=False)
+
+    assert current["alias"] == "work"
+    assert "usage" not in current
+    assert "quota_5h_left" not in current
 
 
 def test_cli_entry_with_sdk_token_keeps_cli_quota(registry, fake_auth_backend, fake_usage_provider):
@@ -739,6 +794,85 @@ def test_list_account_quotas(registry, fake_auth_backend, fake_usage_provider):
 
     assert [row["alias"] for row in rows] == ["personal", "work"]
     assert all(row["available"] is True for row in rows)
+
+
+def test_list_account_quotas_auto_refresh_calls_best_effort(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        manager,
+        "refresh_account",
+        lambda alias, prompt="ping": calls.append(alias) or {"alias": alias},
+    )
+    monkeypatch.setattr(manager, "refresh_candidates", lambda: ["work"])
+
+    rows = manager.list_account_quotas(auto_refresh=True)
+
+    assert rows[0]["alias"] == "work"
+    assert calls == ["work"]
+
+
+def test_list_available_accounts_and_pick_available_account(registry, fake_auth_backend):
+    usage_provider = AliasUsageProvider(
+        {
+            "alias:work": {"five_hour": 24.0, "seven_day": 41.0},
+            "alias:backup": {"five_hour": 0.0, "seven_day": 80.0},
+            "alias:empty": {"five_hour": 100.0, "seven_day": 10.0},
+        }
+    )
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=usage_provider,
+    )
+    manager.capture_current_account("work")
+
+    fake_auth_backend.snapshot.oauth_account["emailAddress"] = "backup@example.com"
+    fake_auth_backend.snapshot.oauth_account["organizationUuid"] = "org-456"
+    fake_auth_backend.snapshot.oauth_account["organizationName"] = "Backup Org"
+    fake_auth_backend.snapshot.oauth_account["accountUuid"] = "acct-456"
+    manager.capture_current_account("backup")
+
+    fake_auth_backend.snapshot.oauth_account["emailAddress"] = "empty@example.com"
+    fake_auth_backend.snapshot.oauth_account["organizationUuid"] = "org-789"
+    fake_auth_backend.snapshot.oauth_account["organizationName"] = "Empty Org"
+    fake_auth_backend.snapshot.oauth_account["accountUuid"] = "acct-789"
+    manager.capture_current_account("empty")
+
+    manager.add_token_account("sdk-only", "token-a", email="sdk@example.com")
+    manager.select_account("work")
+
+    rows = manager.list_available_accounts(include_usage=True)
+    picked = manager.pick_available_account(include_usage=True)
+    relaxed = manager.list_available_accounts(include_usage=False, require_quota=False)
+
+    assert [row["alias"] for row in rows] == ["backup", "work"]
+    assert picked["alias"] == "work"
+    assert {row["alias"] for row in relaxed} == {"backup", "empty", "sdk-only", "work"}
+
+
+def test_pick_available_account_raises_when_no_match(registry, fake_auth_backend):
+    usage_provider = AliasUsageProvider(
+        {
+            "alias:work": {"five_hour": 100.0, "seven_day": 100.0},
+        }
+    )
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=usage_provider,
+    )
+    manager.capture_current_account("work")
+
+    with pytest.raises(AccountSelectionError):
+        manager.pick_available_account()
 
 
 def test_sync_current_account_updates_registry(registry, fake_auth_backend, fake_usage_provider):
@@ -854,3 +988,140 @@ def test_invalid_alias_rejected(registry, fake_auth_backend, fake_usage_provider
 
     with pytest.raises(AccountSelectionError):
         manager.capture_current_account("bad alias")
+
+
+def test_build_sdk_env_auto_refresh_refreshes_expired_cli_alias(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    details = manager.get_account("work")
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
+    refreshed_snapshot = AuthSnapshot(
+        oauth_account=details.snapshot.oauth_account,
+        credentials={
+            "claudeAiOauth": {
+                "accessToken": "access-2",
+                "refreshToken": "refresh-2",
+                "expiresAt": 4102448400000,
+                "scopes": ["user:profile"],
+            }
+        },
+    )
+
+    def fake_refresh(alias: str, *, prompt: str = "ping"):
+        manager.registry.upsert_account(
+            alias=alias,
+            auth_kind=AUTH_KIND_CLI_SNAPSHOT,
+            email=details.record.email,
+            organization_name=details.record.organization_name,
+            organization_id=details.record.organization_id,
+            account_uuid=details.record.account_uuid,
+            captured_at=details.record.captured_at,
+            expires_at=4102448400000,
+            last_selected_at=details.record.last_selected_at,
+            source=details.record.source,
+            snapshot=refreshed_snapshot,
+            last_synced_at=details.record.last_synced_at,
+        )
+        return {"alias": alias, "probe_prompt": prompt, "probe_output": "pong"}
+
+    monkeypatch.setattr(manager, "refresh_account", fake_refresh)
+
+    env = manager.build_sdk_env("work", auto_refresh=True)
+    quota = manager.get_account_quota("work", auto_refresh=True)
+    exported = manager.export_sdk_auth("work", auto_refresh=True)
+    selected = manager.select_account("work", auto_refresh=True)
+
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "access-2"
+    assert quota["status"] == "healthy"
+    assert exported["credentials"]["claudeAiOauth"]["accessToken"] == "access-2"
+    assert selected["status"] == "healthy"
+
+
+def test_top_level_build_sdk_env_supports_auto_refresh(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    monkeypatch.setattr("claude_select.manager.AuthManager", lambda: manager)
+
+    env = build_sdk_env("work", auto_refresh=True)
+
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "access-1"
+
+
+def test_list_accounts_auto_refresh_best_effort(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    details = manager.get_account("work")
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
+    monkeypatch.setattr(
+        manager,
+        "refresh_account",
+        lambda alias, prompt="ping": (_ for _ in ()).throw(AuthExpiredError("boom")),
+    )
+
+    rows = manager.list_accounts(auto_refresh=True)
+
+    assert rows[0]["alias"] == "work"
+    assert rows[0]["status"] == "expired"
+
+
+def test_refresh_account_raises_when_print_probe_fails(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+
+    def failing_probe(prompt: str) -> tuple[bool, str]:
+        return False, "nope"
+
+    fake_auth_backend.run_print_prompt = failing_probe
+
+    with pytest.raises(ConfigError):
+        manager.refresh_account("work")

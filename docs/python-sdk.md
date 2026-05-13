@@ -92,20 +92,26 @@ manager = AuthManager()
 
 for account in manager.list_accounts():
     print(account["alias"], account["auth_kind"], account["email"], account["status"])
+
+for account in manager.list_accounts(include_usage=True, auto_refresh=True):
+    print(account["alias"], account["quota_5h_left"], account["quota_7d_left"])
 ```
 
 ### 2. Get one entry's metadata
 
 ```python
-details = manager.get_account("work")
+details = manager.get_account("work", auto_refresh=True)
 print(details.record.email)
 print(details.record.expires_at)
+
+summary = manager.get_account_summary("work", include_usage=True, auto_refresh=True)
+print(summary["quota_5h_left"], summary["quota_7d_left"])
 ```
 
 ### 3. Export raw auth payload
 
 ```python
-payload = manager.export_sdk_auth("work")
+payload = manager.export_sdk_auth("work", auto_refresh=True)
 print(payload["credentials"])
 ```
 
@@ -121,7 +127,7 @@ print(quota["quota_7d_left"], quota["quota_7d_reset"])
 ### 5. Read quota for one stored CLI account
 
 ```python
-quota = manager.get_account_quota("work")
+quota = manager.get_account_quota("work", auto_refresh=True)
 print(quota["available"])
 print(quota["five_hour"])
 print(quota["seven_day"])
@@ -136,7 +142,50 @@ for quota in manager.list_account_quotas():
     print(quota["alias"], quota["quota_5h_left"], quota["quota_7d_left"])
 ```
 
+### 7. Get only currently available accounts
+
+```python
+available = manager.list_available_accounts(include_usage=True, auto_refresh=True)
+for account in available:
+    print(account["alias"], account["status"], account["quota_5h_left"])
+
+picked = manager.pick_available_account(include_usage=True, auto_refresh=True)
+print("selected", picked["alias"])
+```
+
+When `require_quota=True` (the default), this only returns CLI-backed aliases with:
+
+- non-expired status
+- readable, non-stale quota data
+- remaining quota in both the 5h and 7d windows
+
 Quota data is cached locally for 60 seconds. This keeps `watch` and repeated SDK reads from hitting the remote usage endpoint on every render.
+
+## Auto refresh for Python callers
+
+Some public methods accept `auto_refresh=True`, including:
+
+- `list_accounts()`
+- `list_cli_accounts()`
+- `get_account()`
+- `get_account_summary()`
+- `build_sdk_env()`
+- `export_sdk_auth()`
+- `get_account_quota()`
+- `list_account_quotas()`
+- `list_available_accounts()`
+- `pick_available_account()`
+
+For CLI-backed aliases, `auto_refresh=True` means:
+
+1. If the alias is expired or expiring soon, try the lightweight refresh path first.
+2. That path is equivalent to:
+   - select the alias into Claude's live auth state
+   - run `claude -p "ping"`
+   - sync the refreshed live state back into the registry
+3. If refresh still fails, the original method raises the same error it normally would.
+
+This is opt-in because it mutates Claude's live auth state and triggers a real Claude request.
 
 ## Unsupported auto-selection
 
