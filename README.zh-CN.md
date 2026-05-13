@@ -41,8 +41,10 @@ claude-select init
 2. `claude-select` 启动 `claude auth login`
 3. 完成授权
 4. 回到 `claude-select`
-5. 按回车，让 `claude-select` 把当前登录态采集进本地数据库
-6. 看到一段成功反馈，确认账号已写入数据库，并展示当前账号表
+5. 按回车，让 `claude-select` 读取当前 Claude 登录态
+6. 确认 `claude-select` 展示的当前 `claude auth status`
+7. 让 `claude-select` 把当前登录态采集进本地数据库
+8. 看到一段成功反馈，确认账号已写入数据库，并展示当前账号表
 
 后续也可以单独新增 CLI 账号：
 
@@ -69,6 +71,11 @@ Launching `claude auth login` in this terminal.
 `claude auth login` 会在当前终端里启动。
 登录完成后回到这里继续。
 Press Enter after login is complete...
+Current Claude auth status:
+  email: a@company.com
+  organization: Team A
+  auth method: claude.ai
+Use this identity for alias `work` and continue with capture? [Y/n]
 Captured work <a@company.com> [Team A].
 Status: healthy
 Expires in: 7h 57m
@@ -158,6 +165,12 @@ Updated Claude live auth state:
 Current CLI alias: work
 ```
 
+如果被 `select` 的 CLI alias 已经过期，`select` 仍然会把它写回当前 Claude live auth state，方便你紧接着走快速恢复路径。命令会给出警告，并推荐：
+
+```bash
+claude-select refresh <alias>
+```
+
 ### 5. 在 Python 里使用某个条目
 
 ```python
@@ -204,15 +217,16 @@ claude-select whoami
 各命令含义：
 
 - `init`：首次引导录入多个 CLI 账号，结束后可选进入 token 录入阶段
-- `add`：默认先在当前终端启动 `claude auth login`，然后把当前登录态录进 registry
+- `add`：默认先在当前终端启动 `claude auth login`，展示当前 `claude auth status` 让你确认后，再把当前登录态录进 registry
 - `add-token`：默认先在当前终端启动 `claude setup-token`，然后把长期 token 存进 registry，供 SDK / 程序显式使用；如果 alias 已存在为 CLI 账号，就把 token 挂到该 alias 上
 - `refresh`：对一个 CLI alias 或所有即将过期/已过期的 CLI alias 走轻量恢复路径：`select -> claude -p "ping" -> sync-current`
-- `relogin`：默认先在当前终端启动 `claude auth login`，然后用新的登录态覆盖某个已保存的 `cli` 条目
+- `relogin`：默认先在当前终端启动 `claude auth login`，展示当前 `claude auth status` 让你确认后，再用新的登录态覆盖某个已保存的 `cli` 条目
 - `list`：查看当前 registry，并先对当前 live account 做一次轻量同步
 - `list --usage`：拉取并显示 `cli` 条目的 5h / 7d quota；`token` 条目显示 `n/a`
 - `watch`：用 Rich live view 持续显示当前 Claude live account 和本地 registry，并定期同步当前 live state
 - `watch --usage`：在 live registry 表格中额外显示 5h / 7d quota 列
 - `watch --auto-refresh`：显式开启自动 `refresh`，在 watch 循环里尝试恢复已过期或即将过期的 CLI 账号
+- `watch` 运行时可按 `q` 或 `Esc` 干净退出
 - `select`：把某个已保存的 `cli` 快照写回当前 Claude CLI 登录态
 - `sync-current`：读取当前 Claude live auth state，把已经被 Claude 自动刷新的 token 同步回匹配的 `cli` 记录
 - `remove`：删除某个条目

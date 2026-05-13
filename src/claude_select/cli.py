@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import select
 import shutil
 import subprocess
 import sys
+import termios
 import time
+import tty
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -319,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "add":
             alias = args.alias or input("Alias: ").strip()
             manager.wait_for_login(args.launch)
+            _confirm_current_auth_status(manager, alias=alias, action="capture")
             account = manager.capture_current_account(alias, overwrite=True)
             _print_capture_feedback(manager, account, verb="Captured")
             return 0
@@ -330,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "relogin":
             manager.wait_for_login(args.launch)
+            _confirm_current_auth_status(manager, alias=args.alias, action="relogin")
             account = manager.relogin_account(args.alias)
             _print_capture_feedback(manager, account, verb="Updated")
             return 0
@@ -350,6 +356,16 @@ def main(argv: list[str] | None = None) -> int:
             alias = args.alias or manager.choose_alias_interactively()
             account = manager.select_account(alias)
             print(f"Selected {_account_display(manager, account)}.")
+            if account["status"] == "expired":
+                print(
+                    f"Warning: {account['alias']} is expired. "
+                    f"Try `claude-select refresh {account['alias']}` next."
+                )
+            elif account["status"] == "expiring_soon":
+                print(
+                    f"Heads up: {account['alias']} is close to expiry. "
+                    f"`claude-select refresh {account['alias']}` is recommended."
+                )
             print("Updated Claude live auth state:")
             for target in manager.auth_backend.describe_targets():
                 print(f"  - {target}")
@@ -410,6 +426,7 @@ def _run_init(manager: AuthManager, *, launch: bool) -> int:
         if not alias:
             break
         manager.wait_for_login(launch)
+        _confirm_current_auth_status(manager, alias=alias, action="capture")
         account = manager.capture_current_account(alias, overwrite=True)
         _print_capture_feedback(manager, account, verb="Captured")
         if input("Add another account? [Y/n] ").strip().lower() in {"n", "no"}:
@@ -463,6 +480,28 @@ def _best_effort_sync_current(manager: AuthManager) -> dict[str, Any] | None:
         return manager.sync_current_account()
     except ClaudeSelectError:
         return None
+
+
+def _confirm_current_auth_status(manager: AuthManager, *, alias: str, action: str) -> None:
+    """Show current `claude auth status` and confirm before writing to the registry."""
+    status = manager.auth_backend.read_auth_status()
+    if not isinstance(status, dict):
+        return
+    email = str(status.get("email", "") or "-")
+    org_name = str(status.get("orgName", "") or "-")
+    auth_method = str(status.get("authMethod", "") or "-")
+    print("Current Claude auth status:")
+    print(f"  email: {email}")
+    print(f"  organization: {org_name}")
+    print(f"  auth method: {auth_method}")
+    answer = input(
+        f"Use this identity for alias `{alias}` and continue with {action}? [Y/n] "
+    ).strip().lower()
+    if answer in {"n", "no"}:
+        raise ClaudeSelectError(
+            "Capture cancelled. Re-run `claude auth login`, confirm "
+            "`claude auth status`, then try again."
+        )
 
 
 def _prompt_for_token_capture(manager: AuthManager, *, launch: bool) -> dict[str, str]:
@@ -580,29 +619,99 @@ def _run_watch(
     last_auto_refresh_message: str | None = None
     auto_refresh_attempts: dict[str, float] = {}
     console = Console()
-    with Live(console=console, auto_refresh=False) as live:
-        while True:
-            now = time.monotonic()
-            if now - last_sync_monotonic >= max(sync_interval, 1):
-                _best_effort_sync_current(manager)
-                if auto_refresh:
-                    last_auto_refresh_message = _maybe_auto_refresh_accounts(
-                        manager, auto_refresh_attempts, now
+    with _watch_input_context():
+        try:
+            with Live(console=console, auto_refresh=False) as live:
+                while True:
+                    now = time.monotonic()
+                    if now - last_sync_monotonic >= max(sync_interval, 1):
+                        _best_effort_sync_current(manager)
+                        if auto_refresh:
+                            last_auto_refresh_message = _maybe_auto_refresh_accounts(
+                                manager, auto_refresh_attempts, now
+                            )
+                        last_sync_monotonic = now
+                    live.update(
+                        _build_watch_renderable(
+                            manager,
+                            include_usage=include_usage,
+                            auto_refresh=auto_refresh,
+                            auto_refresh_message=last_auto_refresh_message,
+                        ),
+                        refresh=True,
                     )
-                last_sync_monotonic = now
-            live.update(
-                _build_watch_renderable(
-                    manager,
-                    include_usage=include_usage,
-                    auto_refresh=auto_refresh,
-                    auto_refresh_message=last_auto_refresh_message,
-                ),
-                refresh=True,
-            )
-            count += 1
-            if iterations and count >= iterations:
-                return 0
-            time.sleep(max(interval, 1))
+                    count += 1
+                    if iterations and count >= iterations:
+                        return 0
+                    if _watch_exit_requested():
+                        return 0
+                    time.sleep(max(interval, 1))
+        except KeyboardInterrupt:
+            return 0
+
+
+def _watch_input_context():
+    """Put stdin into cbreak mode so watch can react to q / Esc without Enter."""
+    if not sys.stdin.isatty():
+        return _NullContext()
+    try:
+        fd = sys.stdin.fileno()
+        original = termios.tcgetattr(fd)
+    except (termios.error, ValueError, OSError):
+        return _NullContext()
+    return _TTYContext(fd, original)
+
+
+class _NullContext:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _TTYContext:
+    def __init__(self, fd: int, original: list[Any]):
+        self.fd = fd
+        self.original = original
+
+    def __enter__(self) -> None:
+        tty.setcbreak(self.fd)
+        return None
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.original)
+        return None
+
+
+def _watch_exit_requested() -> bool:
+    """Return whether watch should exit based on a pending key press."""
+    key = _read_watch_key()
+    return _watch_key_requests_exit(key)
+
+
+def _read_watch_key() -> str | None:
+    """Read one watch key press without blocking when stdin is interactive."""
+    if not sys.stdin.isatty():
+        return None
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], 0.0)
+    except (OSError, ValueError):
+        return None
+    if not ready:
+        return None
+    try:
+        chunk = os.read(sys.stdin.fileno(), 1)
+    except OSError:
+        return None
+    if not chunk:
+        return None
+    return chunk.decode("utf-8", errors="ignore")
+
+
+def _watch_key_requests_exit(key: str | None) -> bool:
+    """Return whether a watch key should terminate the loop."""
+    return key in {"q", "Q", "\x1b"}
 
 
 def _build_watch_renderable(

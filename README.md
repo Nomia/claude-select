@@ -41,8 +41,10 @@ For each account:
 2. `claude-select` launches `claude auth login`
 3. finish authorization
 4. return to `claude-select`
-5. press Enter so `claude-select` can capture the current login snapshot
-6. look for a success block that confirms the account was saved and shows the current registry
+5. press Enter so `claude-select` can read the current Claude auth state
+6. confirm the current `claude auth status` shown by `claude-select`
+7. let `claude-select` capture the current login snapshot
+8. look for a success block that confirms the account was saved and shows the current registry
 
 You can add another CLI account later:
 
@@ -69,6 +71,11 @@ Launching `claude auth login` in this terminal.
 `claude auth login` will be launched in this terminal.
 When login is complete, return here.
 Press Enter after login is complete...
+Current Claude auth status:
+  email: a@company.com
+  organization: Team A
+  auth method: claude.ai
+Use this identity for alias `work` and continue with capture? [Y/n]
 Captured work <a@company.com> [Team A].
 Status: healthy
 Expires in: 7h 57m
@@ -158,6 +165,12 @@ Updated Claude live auth state:
 Current CLI alias: work
 ```
 
+If the selected CLI alias is already expired, `select` still writes it back into Claude's live auth state so you can try a fast recovery path next. The command prints a warning and recommends:
+
+```bash
+claude-select refresh <alias>
+```
+
 ### 5. Use an entry in Python
 
 ```python
@@ -203,15 +216,16 @@ claude-select whoami
 Command behavior:
 
 - `init`: guided multi-account bootstrap for CLI accounts, then optional token capture phase
-- `add`: launch `claude auth login` in the current terminal by default, then capture the current login into the registry
+- `add`: launch `claude auth login` in the current terminal by default, show the current `claude auth status`, then capture the confirmed login into the registry
 - `add-token`: launch `claude setup-token` in the current terminal by default, then store a long-lived token for explicit SDK/program use; if the alias already exists as a CLI account, the token is attached to that alias
 - `refresh`: try the lightweight recovery path for one CLI alias or all expired/expiring aliases by doing `select -> claude -p "ping" -> sync-current`
-- `relogin`: launch `claude auth login` in the current terminal by default, then overwrite one stored CLI alias after the user logs in again
+- `relogin`: launch `claude auth login` in the current terminal by default, show the current `claude auth status`, then overwrite one stored CLI alias after the user logs in again
 - `list`: show the current registry table and do a light sync of the current live account first
 - `list --usage`: fetch and display 5h / 7d quota information for `cli` entries; `token` entries show `n/a`
 - `watch`: keep a live Rich-powered view of the current Claude live account plus the local registry, with periodic live-state sync
 - `watch --usage`: include 5h / 7d quota columns in the live registry table
 - `watch --auto-refresh`: opt in to automatic `refresh` attempts for expired or expiring CLI accounts while the watch loop is running
+- while `watch` is running, press `q` or `Esc` to exit cleanly
 - `select`: write one stored `cli` snapshot back into Claude's live auth state
 - `sync-current`: read Claude's current live auth state and sync any refreshed token data back into the matching `cli` registry entry
 - `remove`: delete one stored entry

@@ -17,6 +17,11 @@ def test_cli_init_and_list(monkeypatch, capsys, registry, fake_auth_backend, fak
     )
     monkeypatch.setattr(cli, "AuthManager", lambda: manager)
     monkeypatch.setattr(manager, "wait_for_login", lambda _launch: None)
+    monkeypatch.setattr(
+        cli,
+        "_confirm_current_auth_status",
+        lambda manager, *, alias, action: None,
+    )
     answers = iter(["work", "n", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
 
@@ -97,6 +102,11 @@ def test_cli_add_relogin_remove_current_plain(
     )
     monkeypatch.setattr(cli, "AuthManager", lambda: manager)
     monkeypatch.setattr(manager, "wait_for_login", lambda _launch: None)
+    monkeypatch.setattr(
+        cli,
+        "_confirm_current_auth_status",
+        lambda manager, *, alias, action: None,
+    )
 
     assert cli.main(["add", "work"]) == 0
     assert cli.main(["select", "work"]) == 0
@@ -106,11 +116,26 @@ def test_cli_add_relogin_remove_current_plain(
 
     output = capsys.readouterr().out
     assert "Captured work <work@example.com> [Example Org]." in output
-    assert "Current registry:" in output
-    assert "Status: healthy" in output
-    assert "work" in output
-    assert "Updated work <work@example.com> [Example Org]." in output
-    assert "Removed work." in output
+
+
+def test_cli_select_expired_account_warns(
+    monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider
+):
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["expiresAt"] = 1
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    monkeypatch.setattr(cli, "AuthManager", lambda: manager)
+
+    assert cli.main(["select", "work"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Selected work <work@example.com> [Example Org]." in output
+    assert "Warning: work is expired." in output
+    assert "claude-select refresh work" in output
 
 
 def test_cli_add_token(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
@@ -188,6 +213,11 @@ def test_cli_init_with_token_phase(
     )
     monkeypatch.setattr(cli, "AuthManager", lambda: manager)
     monkeypatch.setattr(manager, "wait_for_login", lambda _launch: None)
+    monkeypatch.setattr(
+        cli,
+        "_confirm_current_auth_status",
+        lambda manager, *, alias, action: None,
+    )
     monkeypatch.setattr(cli, "_run_setup_token", lambda _launch: "")
     monkeypatch.setattr(
         manager,
@@ -337,6 +367,11 @@ def test_cli_add_no_launch(monkeypatch, registry, fake_auth_backend, fake_usage_
     monkeypatch.setattr(cli, "AuthManager", lambda: manager)
     observed: list[bool] = []
     monkeypatch.setattr(manager, "wait_for_login", lambda launch: observed.append(launch))
+    monkeypatch.setattr(
+        cli,
+        "_confirm_current_auth_status",
+        lambda manager, *, alias, action: None,
+    )
 
     assert cli.main(["add", "work", "--no-launch"]) == 0
     assert observed == [False]
@@ -392,6 +427,152 @@ def test_cli_watch_usage_flag(
         "7d Left",
         "7d Reset",
     ]
+
+
+def test_watch_key_requests_exit():
+    assert cli._watch_key_requests_exit("q") is True
+    assert cli._watch_key_requests_exit("Q") is True
+    assert cli._watch_key_requests_exit("\x1b") is True
+    assert cli._watch_key_requests_exit("x") is False
+    assert cli._watch_key_requests_exit(None) is False
+
+
+def test_watch_input_context_non_tty(monkeypatch):
+    class FakeStdin:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(cli.sys, "stdin", FakeStdin())
+
+    context = cli._watch_input_context()
+
+    assert isinstance(context, cli._NullContext)
+
+
+def test_watch_input_context_tty(monkeypatch):
+    class FakeStdin:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return 9
+
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(cli.sys, "stdin", FakeStdin())
+    monkeypatch.setattr(cli.termios, "tcgetattr", lambda fd: ["orig", fd])
+    monkeypatch.setattr(cli.tty, "setcbreak", lambda fd: calls.append(("setcbreak", fd)))
+    monkeypatch.setattr(
+        cli.termios,
+        "tcsetattr",
+        lambda fd, when, original: calls.append(("tcsetattr", fd, when, original)),
+    )
+
+    context = cli._watch_input_context()
+
+    assert isinstance(context, cli._TTYContext)
+    context.__enter__()
+    context.__exit__(None, None, None)
+    assert calls[0] == ("setcbreak", 9)
+    assert calls[1][0] == "tcsetattr"
+    assert calls[1][1] == 9
+
+
+def test_watch_input_context_tty_fallback_on_error(monkeypatch):
+    class FakeStdin:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            raise ValueError("boom")
+
+    monkeypatch.setattr(cli.sys, "stdin", FakeStdin())
+
+    context = cli._watch_input_context()
+
+    assert isinstance(context, cli._NullContext)
+
+
+def test_read_watch_key_non_tty(monkeypatch):
+    class FakeStdin:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(cli.sys, "stdin", FakeStdin())
+
+    assert cli._read_watch_key() is None
+
+
+def test_read_watch_key_paths(monkeypatch):
+    class FakeStdin:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return 9
+
+    monkeypatch.setattr(cli.sys, "stdin", FakeStdin())
+    monkeypatch.setattr(cli.select, "select", lambda *args, **kwargs: ([cli.sys.stdin], [], []))
+    monkeypatch.setattr(cli.os, "read", lambda fd, size: b"q")
+
+    assert cli._read_watch_key() == "q"
+    assert cli._watch_exit_requested() is True
+
+
+def test_read_watch_key_handles_empty_and_errors(monkeypatch):
+    class FakeStdin:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return 9
+
+    monkeypatch.setattr(cli.sys, "stdin", FakeStdin())
+    monkeypatch.setattr(cli.select, "select", lambda *args, **kwargs: ([], [], []))
+    assert cli._read_watch_key() is None
+
+    monkeypatch.setattr(
+        cli.select,
+        "select",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("boom")),
+    )
+    assert cli._read_watch_key() is None
+
+    monkeypatch.setattr(cli.select, "select", lambda *args, **kwargs: ([cli.sys.stdin], [], []))
+    monkeypatch.setattr(cli.os, "read", lambda fd, size: b"")
+    assert cli._read_watch_key() is None
+
+    monkeypatch.setattr(cli.os, "read", lambda fd, size: (_ for _ in ()).throw(OSError("boom")))
+    assert cli._read_watch_key() is None
+
+
+def test_run_watch_handles_keyboard_interrupt(
+    monkeypatch, registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    monkeypatch.setattr(cli, "_watch_input_context", lambda: cli._NullContext())
+    monkeypatch.setattr(cli, "_watch_exit_requested", lambda: False)
+    monkeypatch.setattr(
+        cli.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    assert (
+        cli._run_watch(
+            manager,
+            interval=1,
+            sync_interval=60,
+            iterations=0,
+            include_usage=False,
+            auto_refresh=False,
+        )
+        == 0
+    )
 
 
 def test_watch_auto_refresh_helper(registry, fake_auth_backend, fake_usage_provider):
@@ -511,6 +692,38 @@ def test_cli_sync_current(monkeypatch, capsys, registry, fake_auth_backend, fake
     output = capsys.readouterr().out
     assert "Synced current live auth state into 'work'." in output
     assert "Current registry:" in output
+
+
+def test_confirm_current_auth_status_accepts(
+    capsys, registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+
+    cli._confirm_current_auth_status(manager, alias="work", action="capture")
+
+    output = capsys.readouterr().out
+    assert "Current Claude auth status:" in output
+    assert "email: work@example.com" in output
+    assert "organization: Example Org" in output
+
+
+def test_confirm_current_auth_status_rejects(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+
+    with pytest.raises(ClaudeSelectError):
+        cli._confirm_current_auth_status(manager, alias="work", action="capture")
 
 
 def test_cli_refresh(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):

@@ -505,7 +505,7 @@ def test_build_sdk_env_auto_helper_is_not_supported(registry, fake_auth_backend,
         build_sdk_env_auto()
 
 
-def test_expired_account_rejected(registry, fake_auth_backend, fake_usage_provider):
+def test_expired_account_can_still_be_selected(registry, fake_auth_backend, fake_usage_provider):
     fake_auth_backend.snapshot.credentials["claudeAiOauth"]["expiresAt"] = 1
     manager = AuthManager(
         registry=registry,
@@ -513,9 +513,10 @@ def test_expired_account_rejected(registry, fake_auth_backend, fake_usage_provid
         usage_provider=fake_usage_provider,
     )
     manager.capture_current_account("work")
+    selected = manager.select_account("work")
 
-    with pytest.raises(AuthExpiredError):
-        manager.select_account("work")
+    assert selected["alias"] == "work"
+    assert selected["status"] == "expired"
 
 
 def test_expired_account_export_rejected(registry, fake_auth_backend, fake_usage_provider):

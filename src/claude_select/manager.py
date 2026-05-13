@@ -381,7 +381,7 @@ class AuthManager:
             and details.record.status() == STATUS_EXPIRED
         ):
             self.refresh_account(normalized)
-        return self._activate_cli_account(normalized, allow_expired=False)
+        return self._activate_cli_account(normalized, allow_expired=True)
 
     def refresh_account(self, alias: str, *, prompt: str = "ping") -> dict[str, Any]:
         """Try to refresh one CLI account by triggering a lightweight Claude request."""
@@ -431,10 +431,6 @@ class AuthManager:
         if details.record.auth_kind != AUTH_KIND_CLI_SNAPSHOT:
             raise AccountKindError(
                 f"Account '{details.record.alias}' is a token entry and cannot be selected for CLI."
-            )
-        if not allow_expired and details.record.status() == STATUS_EXPIRED:
-            raise AuthExpiredError(
-                f"Account '{details.record.alias}' is expired. Run relogin before selecting it."
             )
         self.auth_backend.write_snapshot(details.snapshot)
         if mark_selected:
