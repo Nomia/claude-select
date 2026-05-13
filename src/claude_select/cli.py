@@ -223,6 +223,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remove.add_argument("alias", help="Alias to delete.")
 
+    rename = subparsers.add_parser(
+        "rename",
+        aliases=["mv"],
+        help="Rename one stored account alias.",
+        description="Rename one alias without changing its captured auth snapshot or token data.",
+    )
+    rename.add_argument("old_alias", help="Existing alias to rename.")
+    rename.add_argument("new_alias", help="New alias to use.")
+
     export_env = subparsers.add_parser(
         "export-env",
         help="Print environment variables for Claude Agent SDK usage.",
@@ -406,6 +415,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command in {"remove", "rm"}:
             manager.remove_account(args.alias)
             print(f"Removed {args.alias}.")
+            return 0
+        if args.command in {"rename", "mv"}:
+            account = manager.rename_account(args.old_alias, args.new_alias)
+            print(
+                f"Renamed {args.old_alias} -> {account['alias']} "
+                f"for {_account_display(manager, account)}."
+            )
             return 0
         if args.command == "export-env":
             env = manager.build_sdk_env(args.alias, base_env={})

@@ -153,6 +153,24 @@ def test_cli_add_relogin_remove_current_plain(
     assert "Captured work <work@example.com> [Example Org]." in output
 
 
+def test_cli_rename_account(
+    monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    monkeypatch.setattr(cli, "AuthManager", lambda: manager)
+
+    assert cli.main(["rename", "work", "personal"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Renamed work -> personal" in output
+    assert manager.get_account("personal").record.alias == "personal"
+
+
 def test_cli_select_expired_account_warns(
     monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider
 ):

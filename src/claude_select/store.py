@@ -247,6 +247,43 @@ class AuthRegistry:
             )
             connection.execute("DELETE FROM usage_cache WHERE cache_key = ?", (f"alias:{alias}",))
 
+    def rename_account(self, old_alias: str, new_alias: str) -> None:
+        """Rename one account alias and update related registry metadata."""
+        self.initialize()
+        with self.lock(), self._connect() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM accounts WHERE alias = ?",
+                (old_alias,),
+            ).fetchone()
+            if existing is None:
+                raise AccountNotFoundError(f"Account '{old_alias}' was not found.")
+            conflict = connection.execute(
+                "SELECT 1 FROM accounts WHERE alias = ?",
+                (new_alias,),
+            ).fetchone()
+            if conflict is not None:
+                raise sqlite3.IntegrityError(f"Account '{new_alias}' already exists.")
+            connection.execute(
+                "UPDATE accounts SET alias = ? WHERE alias = ?",
+                (new_alias, old_alias),
+            )
+            connection.execute(
+                """
+                UPDATE meta
+                SET value = ?
+                WHERE key = 'current_alias' AND value = ?
+                """,
+                (new_alias, old_alias),
+            )
+            connection.execute(
+                """
+                UPDATE usage_cache
+                SET cache_key = ?
+                WHERE cache_key = ?
+                """,
+                (f"alias:{new_alias}", f"alias:{old_alias}"),
+            )
+
     def mark_selected(self, alias: str, selected_at: str) -> None:
         """Persist selection timestamp and current alias metadata."""
         self.initialize()

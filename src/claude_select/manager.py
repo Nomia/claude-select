@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -88,25 +89,28 @@ class AuthManager:
         now = utc_now()
         rows = []
         for record in self.registry.list_accounts():
-            payload = asdict(record)
+            payload = self._record_payload(record)
             payload["status"] = record.status(now)
             payload["expires_in"] = record.expires_in(now)
-            payload["kind_label"] = self._kind_label(record)
-            payload["display_name"] = self.format_account_label(payload)
             if include_usage:
-                if record.auth_kind == AUTH_KIND_TOKEN:
-                    payload["usage"] = None
-                    payload["quota_5h_left"] = "n/a"
-                    payload["quota_5h_reset"] = "n/a"
-                    payload["quota_7d_left"] = "n/a"
-                    payload["quota_7d_reset"] = "n/a"
-                else:
-                    usage = self._usage_for_alias(record.alias)
-                    payload["usage"] = usage
-                    payload["quota_5h_left"] = self._format_window_remaining(usage, "five_hour")
-                    payload["quota_5h_reset"] = self._format_window_reset(usage, "five_hour")
-                    payload["quota_7d_left"] = self._format_window_remaining(usage, "seven_day")
-                    payload["quota_7d_reset"] = self._format_window_reset(usage, "seven_day")
+                quota = self.get_account_quota(record.alias, auto_refresh=False)
+                payload.update(
+                    {
+                        "usage": quota["usage"],
+                        "available": quota["available"],
+                        "stale": quota["stale"],
+                        "error": quota["error"],
+                        "fetched_at": quota["fetched_at"],
+                        "five_hour": quota["five_hour"],
+                        "seven_day": quota["seven_day"],
+                        "seven_day_opus": quota["seven_day_opus"],
+                        "extra_usage": quota["extra_usage"],
+                        "quota_5h_left": quota["quota_5h_left"],
+                        "quota_5h_reset": quota["quota_5h_reset"],
+                        "quota_7d_left": quota["quota_7d_left"],
+                        "quota_7d_reset": quota["quota_7d_reset"],
+                    }
+                )
             rows.append(payload)
         return rows
 
@@ -365,6 +369,18 @@ class AuthManager:
     def remove_account(self, alias: str) -> None:
         """Delete an account from the registry."""
         self.registry.remove_account(self._normalize_alias(alias))
+
+    def rename_account(self, old_alias: str, new_alias: str) -> dict[str, Any]:
+        """Rename one stored account alias."""
+        normalized_old = self._normalize_alias(old_alias)
+        normalized_new = self._normalize_alias(new_alias)
+        if normalized_old == normalized_new:
+            raise AccountSelectionError("New alias must be different from the current alias.")
+        try:
+            self.registry.rename_account(normalized_old, normalized_new)
+        except sqlite3.IntegrityError as exc:
+            raise AccountExistsError(f"Account '{normalized_new}' already exists.") from exc
+        return self._record_payload(self.registry.get_account(normalized_new).record)
 
     def select_account(
         self,

@@ -572,6 +572,35 @@ def test_remove_account(registry, fake_auth_backend, fake_usage_provider):
     assert manager.list_accounts() == []
 
 
+def test_rename_account_updates_alias_and_current(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    manager.select_account("work")
+
+    renamed = manager.rename_account("work", "personal")
+
+    assert renamed["alias"] == "personal"
+    assert manager.current_alias() == "personal"
+    assert manager.get_account("personal").record.alias == "personal"
+
+
+def test_rename_account_rejects_existing_alias(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    manager.capture_current_account("personal")
+
+    with pytest.raises(AccountExistsError):
+        manager.rename_account("work", "personal")
+
+
 def test_select_token_account_rejected(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
@@ -679,6 +708,10 @@ def test_list_accounts_with_usage(registry, fake_auth_backend, fake_usage_provid
     assert rows[0]["quota_5h_left"] == "76.0%"
     assert rows[0]["quota_7d_left"] == "59.0%"
     assert rows[0]["auth_kind"] == "cli_snapshot"
+    assert rows[0]["available"] is True
+    assert rows[0]["stale"] is False
+    assert rows[0]["error"] is None
+    assert rows[0]["fetched_at"] == "2099-01-01T00:00:00Z"
 
 
 def test_list_cli_and_token_accounts(registry, fake_auth_backend, fake_usage_provider):
@@ -712,6 +745,10 @@ def test_token_entries_show_na_usage(registry, fake_auth_backend, fake_usage_pro
 
     assert rows[0]["quota_5h_left"] == "n/a"
     assert rows[0]["quota_7d_reset"] == "n/a"
+    assert rows[0]["available"] is False
+    assert rows[0]["stale"] is False
+    assert "unsupported" in rows[0]["error"]
+    assert rows[0]["fetched_at"] is None
     assert quota["available"] is False
     assert quota["quota_5h_left"] == "n/a"
     assert "unsupported" in quota["error"]

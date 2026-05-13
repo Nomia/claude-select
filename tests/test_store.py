@@ -56,6 +56,33 @@ def test_registry_usage_cache(registry: AuthRegistry):
     assert registry.get_usage_cache("alias:work", max_age_seconds=10, now_epoch=120) is None
 
 
+def test_registry_rename_account_updates_related_metadata(
+    registry: AuthRegistry, sample_snapshot
+):
+    registry.upsert_account(
+        alias="work",
+        auth_kind="cli_snapshot",
+        email="work@example.com",
+        organization_name="Example Org",
+        organization_id="org-123",
+        account_uuid="acct-123",
+        captured_at="2026-05-10T00:00:00Z",
+        expires_at=4102444800000,
+        last_selected_at="2026-05-10T01:00:00Z",
+        source="claude_cli",
+        snapshot=sample_snapshot,
+    )
+    registry.set_current_alias("work")
+    registry.set_usage_cache("alias:work", {"five_hour": {"used_percentage": 24.0}}, fetched_at=100)
+
+    registry.rename_account("work", "personal")
+
+    assert registry.get_account("personal").record.alias == "personal"
+    assert registry.get_current_alias() == "personal"
+    assert registry.get_usage_cache("alias:personal", max_age_seconds=60, now_epoch=120) is not None
+    assert registry.get_usage_cache("alias:work", max_age_seconds=60, now_epoch=120) is None
+
+
 def test_registry_attach_sdk_token(registry: AuthRegistry, sample_snapshot):
     registry.upsert_account(
         alias="work",
