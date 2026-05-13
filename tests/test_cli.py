@@ -752,6 +752,11 @@ def test_cli_refresh(monkeypatch, capsys, registry, fake_auth_backend, fake_usag
     assert cli.main(["refresh", "work"]) == 0
 
     output = capsys.readouterr().out
+    assert "Refreshing work..." in output
+    assert "[1/4] Activating target account in Claude live auth state..." in output
+    assert "[2/4] Running `claude -p 'ping'` to trigger Claude-side refresh..." in output
+    assert "[3/4] Syncing refreshed live auth state back into the registry..." in output
+    assert "[4/4]" in output
     assert "Refreshed work via `claude -p`." in output
     assert "Probe output: pong" in output
     assert fake_auth_backend.print_prompts == ["ping"]

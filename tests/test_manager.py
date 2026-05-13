@@ -76,6 +76,34 @@ def test_refresh_account_uses_print_probe(registry, fake_auth_backend, fake_usag
     assert fake_auth_backend.print_prompts == ["ping"]
 
 
+def test_refresh_account_emits_progress_events(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    events: list[str] = []
+
+    payload = manager.refresh_account(
+        "work",
+        progress_callback=lambda stage, _payload: events.append(stage),
+    )
+
+    assert payload["alias"] == "work"
+    assert events == [
+        "start",
+        "activating_target",
+        "target_activated",
+        "running_probe",
+        "probe_succeeded",
+        "syncing_current",
+        "sync_succeeded",
+        "restoring_original",
+        "restore_complete",
+    ]
+
+
 def test_refresh_account_restores_previous_live_snapshot(
     registry, fake_auth_backend, fake_usage_provider
 ):

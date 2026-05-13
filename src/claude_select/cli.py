@@ -463,11 +463,51 @@ def _run_refresh(manager: AuthManager, *, alias: str | None) -> int:
         print("No CLI accounts currently need refresh.")
         return 0
     for target in targets:
-        payload = manager.refresh_account(target)
+        print(f"Refreshing {target}...")
+
+        def on_progress(stage: str, payload: dict[str, Any]) -> None:
+            if stage == "activating_target":
+                print("  [1/4] Activating target account in Claude live auth state...")
+            elif stage == "target_activated":
+                print(
+                    f"         Active alias: {payload['alias']} "
+                    f"(status: {payload['status']})"
+                )
+            elif stage == "running_probe":
+                print(
+                    f"  [2/4] Running `claude -p {payload['prompt']!r}` "
+                    "to trigger Claude-side refresh..."
+                )
+            elif stage == "probe_succeeded":
+                print("         Claude probe succeeded.")
+            elif stage == "probe_failed":
+                print("         Claude probe failed.")
+                if payload.get("output"):
+                    print(f"         Reason: {payload['output']}")
+            elif stage == "syncing_current":
+                print("  [3/4] Syncing refreshed live auth state back into the registry...")
+            elif stage == "sync_succeeded":
+                print(f"         {payload['message']}")
+            elif stage == "restoring_original":
+                original_alias = payload.get("original_current_alias") or "-"
+                if payload.get("will_restore"):
+                    print(
+                        "  [4/4] Restoring the previously active live account "
+                        f"({original_alias})..."
+                    )
+                else:
+                    print("  [4/4] Original live account already matches the target.")
+            elif stage == "restore_complete":
+                if payload.get("restored"):
+                    original_alias = payload.get("original_current_alias") or "-"
+                    print(f"         Restored live account: {original_alias}")
+                else:
+                    print("         No restore was needed.")
+
+        payload = manager.refresh_account(target, progress_callback=on_progress)
         print(f"Refreshed {payload['alias']} via `claude -p`.")
         if payload["probe_output"]:
             print(f"Probe output: {payload['probe_output']}")
-        print(payload["sync"]["message"])
         print()
     print("Current registry:")
     print(manager.render_table())

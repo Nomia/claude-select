@@ -383,19 +383,43 @@ class AuthManager:
             self.refresh_account(normalized)
         return self._activate_cli_account(normalized, allow_expired=True)
 
-    def refresh_account(self, alias: str, *, prompt: str = "ping") -> dict[str, Any]:
+    def refresh_account(
+        self,
+        alias: str,
+        *,
+        prompt: str = "ping",
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         """Try to refresh one CLI account by triggering a lightweight Claude request."""
+        def emit(stage: str, **payload: Any) -> None:
+            if progress_callback is not None:
+                progress_callback(stage, payload)
+
         normalized = self._normalize_alias(alias)
         details = self.registry.get_account(normalized)
         original_snapshot = self.auth_backend.read_snapshot()
         original_current_alias = self.current_alias()
         should_restore = self._snapshot_changed(original_snapshot, details.snapshot)
+        emit(
+            "start",
+            alias=normalized,
+            original_current_alias=original_current_alias,
+            will_restore=should_restore,
+            prompt=prompt,
+        )
+        emit("activating_target", alias=normalized)
         account = self._activate_cli_account(normalized, allow_expired=True, mark_selected=False)
+        emit("target_activated", alias=account["alias"], status=account["status"])
         try:
+            emit("running_probe", alias=account["alias"], prompt=prompt)
             ok, output = self.auth_backend.run_print_prompt(prompt)
             if not ok:
+                emit("probe_failed", alias=account["alias"], prompt=prompt, output=output)
                 raise ConfigError(f"Claude refresh probe failed: {output}")
+            emit("probe_succeeded", alias=account["alias"], prompt=prompt, output=output)
+            emit("syncing_current", alias=account["alias"])
             sync_payload = self.sync_current_account()
+            emit("sync_succeeded", alias=account["alias"], message=sync_payload["message"])
             refreshed = self.registry.get_account(account["alias"]).record
             return {
                 "alias": account["alias"],
@@ -405,9 +429,21 @@ class AuthManager:
                 "record": self._record_payload(refreshed),
             }
         finally:
+            emit(
+                "restoring_original",
+                alias=account["alias"],
+                original_current_alias=original_current_alias,
+                will_restore=should_restore,
+            )
             if should_restore:
                 self.auth_backend.write_snapshot(original_snapshot)
             self.registry.set_current_alias(original_current_alias)
+            emit(
+                "restore_complete",
+                alias=account["alias"],
+                original_current_alias=original_current_alias,
+                restored=should_restore,
+            )
 
     def refresh_candidates(self) -> list[str]:
         """Return CLI aliases that should be refreshed soon."""
