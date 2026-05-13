@@ -429,6 +429,105 @@ def test_cli_watch_usage_flag(
     ]
 
 
+def test_cli_list_usage_prints_diagnostics(monkeypatch, capsys):
+    row = {
+        "alias": "work",
+        "auth_kind": "cli_snapshot",
+        "kind_label": "cli",
+        "email": "work@example.com",
+        "organization_name": "Example Org",
+        "status": "healthy",
+        "expires_in": "7h 0m",
+        "last_selected_at": None,
+        "last_synced_at": None,
+        "quota_5h_left": "100.0%~",
+        "quota_5h_reset": "unknown",
+        "quota_7d_left": "95.0%~",
+        "quota_7d_reset": "6d 5h~",
+        "stale": True,
+        "available": True,
+        "error": "Usage API request failed: ECONNREFUSED",
+        "fetched_at": None,
+    }
+
+    class StubManager:
+        def __init__(self):
+            self.auth_backend = None
+
+        def list_accounts(self, include_usage=False, auto_refresh=False):
+            assert include_usage is True
+            return [row]
+
+        def render_table(self, include_usage=False):
+            raise AssertionError("render_table should not be used for --usage")
+
+        def _table_row(self, payload, include_usage):
+            return [
+                payload["alias"],
+                payload["kind_label"],
+                payload["email"],
+                payload["organization_name"],
+                payload["status"],
+                payload["expires_in"],
+                "-",
+                "-",
+                payload["quota_5h_left"],
+                payload["quota_5h_reset"],
+                payload["quota_7d_left"],
+                payload["quota_7d_reset"],
+            ]
+
+        def _format_last_selected(self, value):
+            return value if value else "-"
+
+    monkeypatch.setattr(cli, "AuthManager", lambda: StubManager())
+    monkeypatch.setattr(cli, "_best_effort_sync_current", lambda _manager: None)
+
+    assert cli.main(["list", "--usage"]) == 0
+    output = capsys.readouterr().out
+    assert "Usage diagnostics:" in output
+    assert "work: stale usage cache" in output
+    assert "Usage API request failed: ECONNREFUSED" in output
+
+
+def test_build_usage_diagnostics_panel_shows_stale_and_unavailable(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    rows = [
+        {
+            "alias": "work",
+            "auth_kind": "cli_snapshot",
+            "kind_label": "cli",
+            "stale": True,
+            "available": True,
+            "error": "boom",
+            "fetched_at": None,
+        },
+        {
+            "alias": "personal",
+            "auth_kind": "cli_snapshot",
+            "kind_label": "cli",
+            "stale": False,
+            "available": False,
+            "error": "usage unavailable",
+            "fetched_at": None,
+        },
+    ]
+
+    panel = cli._build_usage_diagnostics_panel(manager, rows)
+
+    assert panel is not None
+    rendered = panel.renderable
+    text = rendered if isinstance(rendered, str) else str(rendered)
+    assert "work: stale usage cache" in text
+    assert "personal: usage unavailable" in text
+
+
 def test_watch_key_requests_exit():
     assert cli._watch_key_requests_exit("q") is True
     assert cli._watch_key_requests_exit("Q") is True

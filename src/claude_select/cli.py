@@ -341,7 +341,21 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command in {"list", "ls"}:
             _best_effort_sync_current(manager)
-            print(manager.render_table(include_usage=args.usage))
+            if args.usage:
+                rows = manager.list_accounts(include_usage=True)
+                print(_render_plain_table(manager, rows, include_usage=True))
+                diagnostics_lines = _usage_diagnostic_lines(manager, rows)
+                if diagnostics_lines:
+                    print()
+                    print("Usage diagnostics:")
+                    for line in diagnostics_lines:
+                        print(line)
+                    print(
+                        "Tip: run `claude-select list --usage` again "
+                        "to retry the foreground fetch."
+                    )
+            else:
+                print(manager.render_table(include_usage=False))
             return 0
         if args.command == "watch":
             return _run_watch(
@@ -762,10 +776,15 @@ def _build_watch_renderable(
     auto_refresh_message: str | None = None,
 ) -> Group:
     """Build the live watch layout."""
+    rows = manager.list_accounts(include_usage=include_usage)
     renderables: list[Panel | Table] = [
         _build_current_account_panel(manager),
-        _build_accounts_table(manager, include_usage=include_usage),
+        _build_accounts_table(manager, include_usage=include_usage, rows=rows),
     ]
+    if include_usage:
+        diagnostics_panel = _build_usage_diagnostics_panel(manager, rows)
+        if diagnostics_panel is not None:
+            renderables.append(diagnostics_panel)
     hint_panel = _build_watch_hint_panel(manager, auto_refresh=auto_refresh)
     if hint_panel is not None:
         renderables.append(hint_panel)
@@ -877,9 +896,81 @@ def _build_current_account_panel(manager: AuthManager) -> Panel:
     return Panel("\n".join(lines), title="Current Claude live account", expand=True)
 
 
-def _build_accounts_table(manager: AuthManager, *, include_usage: bool) -> Table | Panel:
+def _usage_diagnostic_lines(manager: AuthManager, rows: list[dict[str, Any]]) -> list[str]:
+    """Summarize stale or unavailable usage rows for display."""
+    lines: list[str] = []
+    for row in rows:
+        kind = str(row.get("kind_label") or row["auth_kind"]).lower()
+        if "cli" not in kind:
+            continue
+        alias = str(row["alias"])
+        fetched_at = manager._format_last_selected(row.get("fetched_at"))
+        if row.get("stale"):
+            lines.append(f"{alias}: stale usage cache")
+            lines.append(f"  last successful fetch: {fetched_at}")
+            lines.append(f"  last fetch error: {row.get('error') or 'unknown fetch error'}")
+        elif not row.get("available"):
+            lines.append(f"{alias}: usage unavailable")
+            lines.append(f"  last successful fetch: {fetched_at}")
+            lines.append(f"  last fetch error: {row.get('error') or 'usage unavailable'}")
+    return lines
+
+
+def _build_usage_diagnostics_panel(
+    manager: AuthManager,
+    rows: list[dict[str, Any]],
+) -> Panel | None:
+    """Render usage diagnostics when any CLI quota row is stale or unavailable."""
+    lines = _usage_diagnostic_lines(manager, rows)
+    if not lines:
+        return None
+    lines.append("")
+    lines.append("Tip: run `claude-select list --usage` to retry the foreground fetch.")
+    return Panel("\n".join(lines), title="Usage diagnostics", expand=True)
+
+
+def _render_plain_table(
+    manager: AuthManager,
+    rows: list[dict[str, Any]],
+    *,
+    include_usage: bool,
+) -> str:
+    """Render an already-fetched account list as a plain-text table."""
+    if not rows:
+        return "No accounts have been captured yet."
+    headers = [
+        "Alias",
+        "Kind",
+        "Email",
+        "Organization",
+        "Status",
+        "Expires In",
+        "Last Selected",
+        "Last Synced",
+    ]
+    if include_usage:
+        headers.extend(["5h Left", "5h Reset", "7d Left", "7d Reset"])
+    matrix = [headers]
+    for row in rows:
+        matrix.append(manager._table_row(row, include_usage=include_usage))
+    widths = [max(len(row[index]) for row in matrix) for index in range(len(headers))]
+
+    def format_row(values: list[str]) -> str:
+        return "  ".join(value.ljust(width) for value, width in zip(values, widths, strict=False))
+
+    lines = [format_row(matrix[0]), format_row(["-" * width for width in widths])]
+    lines.extend(format_row(row) for row in matrix[1:])
+    return "\n".join(lines)
+
+
+def _build_accounts_table(
+    manager: AuthManager,
+    *,
+    include_usage: bool,
+    rows: list[dict[str, Any]] | None = None,
+) -> Table | Panel:
     """Render the local registry as a rich table."""
-    rows = manager.list_accounts(include_usage=include_usage)
+    rows = rows if rows is not None else manager.list_accounts(include_usage=include_usage)
     if not rows:
         return Panel("No accounts have been captured yet.", title="Registry", expand=True)
     table = Table(title="Local account registry", expand=True)
