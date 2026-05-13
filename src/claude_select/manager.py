@@ -293,19 +293,29 @@ class AuthManager:
 
     def refresh_account(self, alias: str, *, prompt: str = "ping") -> dict[str, Any]:
         """Try to refresh one CLI account by triggering a lightweight Claude request."""
-        account = self._activate_cli_account(alias, allow_expired=True)
-        ok, output = self.auth_backend.run_print_prompt(prompt)
-        if not ok:
-            raise ConfigError(f"Claude refresh probe failed: {output}")
-        sync_payload = self.sync_current_account()
-        refreshed = self.registry.get_account(account["alias"]).record
-        return {
-            "alias": account["alias"],
-            "probe_prompt": prompt,
-            "probe_output": output,
-            "sync": sync_payload,
-            "record": self._record_payload(refreshed),
-        }
+        normalized = self._normalize_alias(alias)
+        details = self.registry.get_account(normalized)
+        original_snapshot = self.auth_backend.read_snapshot()
+        original_current_alias = self.current_alias()
+        should_restore = self._snapshot_changed(original_snapshot, details.snapshot)
+        account = self._activate_cli_account(normalized, allow_expired=True, mark_selected=False)
+        try:
+            ok, output = self.auth_backend.run_print_prompt(prompt)
+            if not ok:
+                raise ConfigError(f"Claude refresh probe failed: {output}")
+            sync_payload = self.sync_current_account()
+            refreshed = self.registry.get_account(account["alias"]).record
+            return {
+                "alias": account["alias"],
+                "probe_prompt": prompt,
+                "probe_output": output,
+                "sync": sync_payload,
+                "record": self._record_payload(refreshed),
+            }
+        finally:
+            if should_restore:
+                self.auth_backend.write_snapshot(original_snapshot)
+            self.registry.set_current_alias(original_current_alias)
 
     def refresh_candidates(self) -> list[str]:
         """Return CLI aliases that should be refreshed soon."""
@@ -317,7 +327,13 @@ class AuthManager:
             and row["status"] in {STATUS_EXPIRED, "expiring_soon"}
         ]
 
-    def _activate_cli_account(self, alias: str, *, allow_expired: bool) -> dict[str, Any]:
+    def _activate_cli_account(
+        self,
+        alias: str,
+        *,
+        allow_expired: bool,
+        mark_selected: bool = True,
+    ) -> dict[str, Any]:
         """Write a stored CLI snapshot back into Claude's live auth backend."""
         details = self.registry.get_account(self._normalize_alias(alias))
         if details.record.auth_kind != AUTH_KIND_CLI_SNAPSHOT:
@@ -329,8 +345,9 @@ class AuthManager:
                 f"Account '{details.record.alias}' is expired. Run relogin before selecting it."
             )
         self.auth_backend.write_snapshot(details.snapshot)
-        selected_at = utc_now_iso()
-        self.registry.mark_selected(details.record.alias, selected_at)
+        if mark_selected:
+            selected_at = utc_now_iso()
+            self.registry.mark_selected(details.record.alias, selected_at)
         refreshed = self.registry.get_account(details.record.alias).record
         return self._record_payload(refreshed)
 

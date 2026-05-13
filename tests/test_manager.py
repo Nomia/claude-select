@@ -75,6 +75,43 @@ def test_refresh_account_uses_print_probe(registry, fake_auth_backend, fake_usag
     assert fake_auth_backend.print_prompts == ["ping"]
 
 
+def test_refresh_account_restores_previous_live_snapshot(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("test1")
+    manager.select_account("test1")
+
+    fake_auth_backend.snapshot = AuthSnapshot(
+        oauth_account={
+            "emailAddress": "work@example.com",
+            "organizationUuid": "org-456",
+            "organizationName": "Other Org",
+            "accountUuid": "acct-456",
+        },
+        credentials={
+            "claudeAiOauth": {
+                "accessToken": "access-2",
+                "refreshToken": "refresh-2",
+                "expiresAt": 4102444800000,
+                "scopes": ["user:profile"],
+            }
+        },
+    )
+    manager.capture_current_account("test2")
+    manager.select_account("test1")
+
+    payload = manager.refresh_account("test2")
+
+    assert payload["alias"] == "test2"
+    assert manager.current_alias() == "test1"
+    assert fake_auth_backend.snapshot.oauth_account["organizationName"] == "Example Org"
+
+
 def test_refresh_candidates_filters_cli_accounts(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,

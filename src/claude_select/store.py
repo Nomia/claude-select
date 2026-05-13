@@ -274,6 +274,21 @@ class AuthRegistry:
             ).fetchone()
         return str(row[0]) if row else None
 
+    def set_current_alias(self, alias: str | None) -> None:
+        """Set or clear the current CLI alias metadata without touching timestamps."""
+        self.initialize()
+        with self.lock(), self._connect() as connection:
+            if alias is None:
+                connection.execute("DELETE FROM meta WHERE key = 'current_alias'")
+                return
+            connection.execute(
+                """
+                    INSERT INTO meta (key, value) VALUES ('current_alias', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                (alias,),
+            )
+
     def set_usage_cache(self, cache_key: str, payload: dict[str, object], fetched_at: int) -> None:
         """Upsert one cached usage payload."""
         self.initialize()

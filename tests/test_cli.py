@@ -394,6 +394,35 @@ def test_cli_watch_usage_flag(
     ]
 
 
+def test_watch_auto_refresh_helper(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    account = manager.capture_current_account("work")
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=account["auth_kind"],
+        email=account["email"],
+        organization_name=account["organization_name"],
+        organization_id=account["organization_id"],
+        account_uuid=account["account_uuid"],
+        captured_at=account["captured_at"],
+        expires_at=0,
+        last_selected_at=account["last_selected_at"],
+        source=account["source"],
+        snapshot=manager.get_account("work").snapshot,
+        last_synced_at=account["last_synced_at"],
+    )
+
+    message = cli._maybe_auto_refresh_accounts(manager, {}, 1000.0)
+
+    assert message is not None
+    assert "Auto-refreshed work" in message
+    assert fake_auth_backend.print_prompts == ["ping"]
+
+
 def test_watch_hint_panel_for_expired_account(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
@@ -414,7 +443,57 @@ def test_watch_hint_panel_for_expired_account(registry, fake_auth_backend, fake_
     assert hint is not None
     assert hint.title == "Action recommended"
     assert "claude-select refresh work" in str(hint.renderable)
+    assert "claude-select watch --auto-refresh" in str(hint.renderable)
     assert "claude-select relogin work" in str(hint.renderable)
+
+
+def test_watch_hint_panel_for_expired_account_with_auto_refresh(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.list_accounts = lambda include_usage=False: [  # type: ignore[method-assign]
+        {
+            "alias": "work",
+            "auth_kind": "cli",
+            "kind_label": "cli",
+            "status": "expired",
+        }
+    ]
+
+    hint = cli._build_watch_hint_panel(manager, auto_refresh=True)
+
+    assert hint is not None
+    assert "Auto-refresh is enabled" in str(hint.renderable)
+    assert "claude-select refresh work" not in str(hint.renderable)
+    assert "claude-select relogin work" in str(hint.renderable)
+
+
+def test_watch_hint_panel_for_expiring_account_mentions_auto_refresh(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.list_accounts = lambda include_usage=False: [  # type: ignore[method-assign]
+        {
+            "alias": "work",
+            "auth_kind": "cli",
+            "kind_label": "cli",
+            "status": "expiring_soon",
+        }
+    ]
+
+    hint = cli._build_watch_hint_panel(manager)
+
+    assert hint is not None
+    assert "Recommended: claude-select refresh work" in str(hint.renderable)
+    assert "claude-select watch --auto-refresh" in str(hint.renderable)
 
 
 def test_cli_sync_current(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):

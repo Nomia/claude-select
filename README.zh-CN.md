@@ -121,6 +121,7 @@ claude-select list --usage
 claude-select whoami
 claude-select watch
 claude-select watch --usage
+claude-select watch --auto-refresh
 ```
 
 展示效果大致如下：
@@ -211,6 +212,7 @@ claude-select whoami
 - `list --usage`：拉取并显示 `cli` 条目的 5h / 7d quota；`token` 条目显示 `n/a`
 - `watch`：用 Rich live view 持续显示当前 Claude live account 和本地 registry，并定期同步当前 live state
 - `watch --usage`：在 live registry 表格中额外显示 5h / 7d quota 列
+- `watch --auto-refresh`：显式开启自动 `refresh`，在 watch 循环里尝试恢复已过期或即将过期的 CLI 账号
 - `select`：把某个已保存的 `cli` 快照写回当前 Claude CLI 登录态
 - `sync-current`：读取当前 Claude live auth state，把已经被 Claude 自动刷新的 token 同步回匹配的 `cli` 记录
 - `remove`：删除某个条目
@@ -279,8 +281,8 @@ quota 数据会在本地缓存 60 秒。`watch`、`whoami` 和重复的 CLI quot
 
 它只读取保存时记录下来的 `expiresAt`，然后推导状态：
 
-- `healthy`：距离过期超过 6 小时
-- `expiring_soon`：距离过期不超过 6 小时
+- `healthy`：距离过期超过 1 小时
+- `expiring_soon`：距离过期不超过 1 小时
 - `expired`：已经过期
 - `unknown`：没有记录到 `expiresAt`
 

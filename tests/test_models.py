@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from claude_select.models import (
     STATUS_EXPIRED,
     STATUS_EXPIRING_SOON,
@@ -18,8 +20,16 @@ def test_compute_status_expired():
     assert compute_status(1) == STATUS_EXPIRED
 
 
+def test_compute_status_healthy():
+    now = datetime(2026, 5, 13, 0, 0, tzinfo=UTC)
+    expires_at = int((now.timestamp() + 2 * 60 * 60) * 1000)
+    assert compute_status(expires_at, now) == STATUS_HEALTHY
+
+
 def test_compute_status_expiring_soon():
-    assert compute_status(4102444800000) in {STATUS_HEALTHY, STATUS_EXPIRING_SOON}
+    now = datetime(2026, 5, 13, 0, 0, tzinfo=UTC)
+    expires_at = int((now.timestamp() + 30 * 60) * 1000)
+    assert compute_status(expires_at, now) == STATUS_EXPIRING_SOON
 
 
 def test_format_remaining_unknown():

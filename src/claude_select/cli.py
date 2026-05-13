@@ -21,6 +21,7 @@ from claude_select.exceptions import ClaudeSelectError
 from claude_select.manager import AuthManager
 
 TOKEN_RE = re.compile(r"(sk-ant-oat[0-9A-Za-z._-]+)")
+AUTO_REFRESH_COOLDOWN_SECONDS = 30 * 60
 
 
 def _account_display(manager: AuthManager, account: dict[str, Any]) -> str:
@@ -176,6 +177,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=60,
         help="How often to sync the current Claude live auth state back into the registry.",
+    )
+    watch.add_argument(
+        "--auto-refresh",
+        action="store_true",
+        help=(
+            "Attempt `claude-select refresh` automatically for expired or expiring CLI "
+            "accounts while watching."
+        ),
     )
     watch.add_argument(
         "--iterations",
@@ -335,6 +344,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.sync_interval,
                 args.iterations,
                 include_usage=args.usage,
+                auto_refresh=args.auto_refresh,
             )
         if args.command in {"select", "use"}:
             alias = args.alias or manager.choose_alias_interactively()
@@ -562,37 +572,81 @@ def _run_watch(
     iterations: int,
     *,
     include_usage: bool,
+    auto_refresh: bool,
 ) -> int:
     """Render the account table repeatedly with a live terminal view."""
     count = 0
     last_sync_monotonic = 0.0
+    last_auto_refresh_message: str | None = None
+    auto_refresh_attempts: dict[str, float] = {}
     console = Console()
     with Live(console=console, auto_refresh=False) as live:
         while True:
             now = time.monotonic()
             if now - last_sync_monotonic >= max(sync_interval, 1):
                 _best_effort_sync_current(manager)
+                if auto_refresh:
+                    last_auto_refresh_message = _maybe_auto_refresh_accounts(
+                        manager, auto_refresh_attempts, now
+                    )
                 last_sync_monotonic = now
-            live.update(_build_watch_renderable(manager, include_usage=include_usage), refresh=True)
+            live.update(
+                _build_watch_renderable(
+                    manager,
+                    include_usage=include_usage,
+                    auto_refresh=auto_refresh,
+                    auto_refresh_message=last_auto_refresh_message,
+                ),
+                refresh=True,
+            )
             count += 1
             if iterations and count >= iterations:
                 return 0
             time.sleep(max(interval, 1))
 
 
-def _build_watch_renderable(manager: AuthManager, *, include_usage: bool) -> Group:
+def _build_watch_renderable(
+    manager: AuthManager,
+    *,
+    include_usage: bool,
+    auto_refresh: bool = False,
+    auto_refresh_message: str | None = None,
+) -> Group:
     """Build the live watch layout."""
     renderables: list[Panel | Table] = [
         _build_current_account_panel(manager),
         _build_accounts_table(manager, include_usage=include_usage),
     ]
-    hint_panel = _build_watch_hint_panel(manager)
+    hint_panel = _build_watch_hint_panel(manager, auto_refresh=auto_refresh)
     if hint_panel is not None:
         renderables.append(hint_panel)
+    if auto_refresh_message:
+        renderables.append(Panel(auto_refresh_message, title="Auto refresh", expand=True))
     return Group(*renderables)
 
 
-def _build_watch_hint_panel(manager: AuthManager) -> Panel | None:
+def _maybe_auto_refresh_accounts(
+    manager: AuthManager,
+    attempts: dict[str, float],
+    now: float,
+) -> str | None:
+    """Best-effort auto-refresh for watch mode with per-alias cooldown."""
+    messages: list[str] = []
+    for alias in manager.refresh_candidates():
+        last_attempt = attempts.get(alias)
+        if last_attempt is not None and now - last_attempt < AUTO_REFRESH_COOLDOWN_SECONDS:
+            continue
+        attempts[alias] = now
+        try:
+            payload = manager.refresh_account(alias)
+        except ClaudeSelectError as exc:
+            messages.append(f"Auto-refresh failed for {alias}: {exc}")
+            continue
+        messages.append(f"Auto-refreshed {alias}: {payload['sync']['message']}")
+    return "\n".join(messages) if messages else None
+
+
+def _build_watch_hint_panel(manager: AuthManager, *, auto_refresh: bool = False) -> Panel | None:
     """Render a next-step hint panel for expiring or expired CLI accounts."""
     rows = manager.list_accounts(include_usage=False)
     managed_rows = [
@@ -600,24 +654,50 @@ def _build_watch_hint_panel(manager: AuthManager) -> Panel | None:
     ]
     expired_aliases = [row["alias"] for row in managed_rows if row["status"] == "expired"]
     if expired_aliases:
-        lines = [
-            "One or more CLI accounts have expired.",
-            "Fastest recovery:",
-        ]
-        if len(expired_aliases) == 1:
-            lines.append(f"Run: claude-select refresh {expired_aliases[0]}")
+        if auto_refresh:
+            lines = [
+                "One or more CLI accounts have expired.",
+                "Auto-refresh is enabled and will keep trying the lightweight recovery path.",
+                "",
+                "Fallback:",
+            ]
         else:
-            lines.append("Run: claude-select refresh")
-        lines.extend(
-            ["", "Fallback:", *[f"claude-select relogin {alias}" for alias in expired_aliases]]
-        )
+            lines = [
+                "One or more CLI accounts have expired.",
+                "Fastest recovery:",
+            ]
+            if len(expired_aliases) == 1:
+                lines.append(f"Run: claude-select refresh {expired_aliases[0]}")
+            else:
+                lines.append("Run: claude-select refresh")
+            lines.extend(
+                [
+                    "",
+                    "Tip: run `claude-select watch --auto-refresh` "
+                    "to let watch try this automatically.",
+                    "",
+                    "Fallback:",
+                ]
+            )
+        lines.extend([f"claude-select relogin {alias}" for alias in expired_aliases])
         return Panel("\n".join(lines), title="Action recommended", expand=True)
 
     expiring_aliases = [row["alias"] for row in managed_rows if row["status"] == "expiring_soon"]
     if expiring_aliases:
-        lines = ["Some CLI accounts are close to expiry."]
-        for alias in expiring_aliases:
-            lines.append(f"Recommended: claude-select refresh {alias}")
+        if auto_refresh:
+            lines = [
+                "Some CLI accounts are close to expiry.",
+                "Auto-refresh is enabled and will try to refresh them during the watch loop.",
+            ]
+        else:
+            lines = ["Some CLI accounts are close to expiry."]
+            for alias in expiring_aliases:
+                lines.append(f"Recommended: claude-select refresh {alias}")
+            lines.append("")
+            lines.append(
+                "Tip: run `claude-select watch --auto-refresh` "
+                "to let watch try refresh automatically."
+            )
         return Panel("\n".join(lines), title="Heads up", expand=True)
 
     return None

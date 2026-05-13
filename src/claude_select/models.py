@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-WARNING_WINDOW_SECONDS = 6 * 60 * 60
+WARNING_WINDOW_SECONDS = 1 * 60 * 60
 
 STATUS_HEALTHY = "healthy"
 STATUS_EXPIRING_SOON = "expiring_soon"

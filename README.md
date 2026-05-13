@@ -121,6 +121,7 @@ claude-select list --usage
 claude-select whoami
 claude-select watch
 claude-select watch --usage
+claude-select watch --auto-refresh
 ```
 
 Example table:
@@ -210,6 +211,7 @@ Command behavior:
 - `list --usage`: fetch and display 5h / 7d quota information for `cli` entries; `token` entries show `n/a`
 - `watch`: keep a live Rich-powered view of the current Claude live account plus the local registry, with periodic live-state sync
 - `watch --usage`: include 5h / 7d quota columns in the live registry table
+- `watch --auto-refresh`: opt in to automatic `refresh` attempts for expired or expiring CLI accounts while the watch loop is running
 - `select`: write one stored `cli` snapshot back into Claude's live auth state
 - `sync-current`: read Claude's current live auth state and sync any refreshed token data back into the matching `cli` registry entry
 - `remove`: delete one stored entry
@@ -278,8 +280,8 @@ Quota responses are cached locally for 60 seconds. `watch`, `whoami`, and repeat
 
 It reads the stored `expiresAt` timestamp and derives status from it:
 
-- `healthy`: more than 6 hours remain
-- `expiring_soon`: 6 hours or less remain
+- `healthy`: more than 1 hour remains
+- `expiring_soon`: 1 hour or less remains
 - `expired`: already expired
 - `unknown`: no `expiresAt` was captured
 
