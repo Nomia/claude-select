@@ -714,6 +714,40 @@ def test_list_accounts_with_usage(registry, fake_auth_backend, fake_usage_provid
     assert rows[0]["fetched_at"] == "2099-01-01T00:00:00Z"
 
 
+def test_list_accounts_with_cache_only_usage(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    fake_usage_provider.cached_payload = {
+        "five_hour": {
+            "used_percentage": 60.0,
+            "resets_at": "2099-01-01T05:00:00Z",
+        },
+        "seven_day": {
+            "used_percentage": 5.0,
+            "resets_at": "2099-01-07T00:00:00Z",
+        },
+        "seven_day_opus": None,
+        "extra_usage": None,
+        "fetched_at": "2099-01-01T00:00:00Z",
+        "stale": False,
+        "error": None,
+    }
+
+    rows = manager.list_accounts(
+        include_usage=True,
+        usage_mode="cache_only",
+        usage_stale_after_seconds=300,
+    )
+
+    assert rows[0]["quota_5h_left"] == "40.0%"
+    assert rows[0]["quota_7d_left"] == "95.0%"
+    assert fake_usage_provider.calls == ["cached:alias:work"]
+
+
 def test_list_cli_and_token_accounts(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,

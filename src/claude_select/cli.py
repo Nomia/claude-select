@@ -26,6 +26,9 @@ from claude_select.manager import AuthManager
 
 TOKEN_RE = re.compile(r"(sk-ant-oat[0-9A-Za-z._-]+)")
 AUTO_REFRESH_COOLDOWN_SECONDS = 30 * 60
+WATCH_USAGE_REFRESH_INTERVAL_SECONDS = 5 * 60
+WATCH_USAGE_ALIAS_RATE_LIMIT_BACKOFF_SECONDS = 30 * 60
+WATCH_USAGE_GLOBAL_RATE_LIMIT_BACKOFF_SECONDS = 10 * 60
 
 
 def _account_display(manager: AuthManager, account: dict[str, Any]) -> str:
@@ -735,6 +738,8 @@ def _run_watch(
     last_sync_monotonic = 0.0
     last_auto_refresh_message: str | None = None
     auto_refresh_attempts: dict[str, float] = {}
+    usage_refresh_state: dict[str, dict[str, Any]] = {}
+    last_usage_refresh_message: str | None = None
     console = Console()
     with _watch_input_context():
         try:
@@ -748,12 +753,31 @@ def _run_watch(
                                 manager, auto_refresh_attempts, now
                             )
                         last_sync_monotonic = now
+                    rows = manager.list_accounts(
+                        include_usage=include_usage,
+                        usage_mode="cache_only" if include_usage else "foreground",
+                        usage_stale_after_seconds=WATCH_USAGE_REFRESH_INTERVAL_SECONDS,
+                    )
+                    if include_usage:
+                        last_usage_refresh_message = _maybe_refresh_watch_usage(
+                            manager,
+                            rows=rows,
+                            state=usage_refresh_state,
+                            now=now,
+                        )
+                        rows = manager.list_accounts(
+                            include_usage=True,
+                            usage_mode="cache_only",
+                            usage_stale_after_seconds=WATCH_USAGE_REFRESH_INTERVAL_SECONDS,
+                        )
                     live.update(
                         _build_watch_renderable(
                             manager,
                             include_usage=include_usage,
+                            rows=rows,
                             auto_refresh=auto_refresh,
                             auto_refresh_message=last_auto_refresh_message,
+                            usage_refresh_message=last_usage_refresh_message,
                         ),
                         refresh=True,
                     )
@@ -835,11 +859,13 @@ def _build_watch_renderable(
     manager: AuthManager,
     *,
     include_usage: bool,
+    rows: list[dict[str, Any]] | None = None,
     auto_refresh: bool = False,
     auto_refresh_message: str | None = None,
+    usage_refresh_message: str | None = None,
 ) -> Group:
     """Build the live watch layout."""
-    rows = manager.list_accounts(include_usage=include_usage)
+    rows = rows if rows is not None else manager.list_accounts(include_usage=include_usage)
     renderables: list[Panel | Table] = [
         _build_current_account_panel(manager),
         _build_accounts_table(manager, include_usage=include_usage, rows=rows),
@@ -851,6 +877,8 @@ def _build_watch_renderable(
     hint_panel = _build_watch_hint_panel(manager, auto_refresh=auto_refresh)
     if hint_panel is not None:
         renderables.append(hint_panel)
+    if usage_refresh_message:
+        renderables.append(Panel(usage_refresh_message, title="Usage refresh", expand=True))
     if auto_refresh_message:
         renderables.append(Panel(auto_refresh_message, title="Auto refresh", expand=True))
     return Group(*renderables)
@@ -937,7 +965,7 @@ def _build_watch_hint_panel(manager: AuthManager, *, auto_refresh: bool = False)
 def _build_current_account_panel(manager: AuthManager) -> Panel:
     """Render the current Claude live auth state."""
     try:
-        current = manager.current_live_account()
+        current = manager.current_live_account(include_usage=False)
     except ClaudeSelectError as exc:
         return Panel(
             f"Current live auth state is unavailable.\n{exc}",
@@ -977,6 +1005,94 @@ def _usage_diagnostic_lines(manager: AuthManager, rows: list[dict[str, Any]]) ->
             lines.append(f"  last successful fetch: {fetched_at}")
             lines.append(f"  last fetch error: {row.get('error') or 'usage unavailable'}")
     return lines
+
+
+def _maybe_refresh_watch_usage(
+    manager: AuthManager,
+    *,
+    rows: list[dict[str, Any]],
+    state: dict[str, dict[str, Any]],
+    now: float,
+) -> str | None:
+    """Refresh at most one stale/unavailable usage row per watch cycle with backoff."""
+    global_until = _watch_usage_global_backoff_until(state)
+    if now < global_until:
+        return (
+            "Usage refresh is backing off globally after rate limiting. "
+            f"Retrying in {int(global_until - now)}s."
+        )
+
+    candidates = [
+        row
+        for row in rows
+        if "cli" in str(row.get("kind_label") or row.get("auth_kind", "")).lower()
+        and (row.get("stale") or not row.get("available"))
+    ]
+    if not candidates:
+        return None
+
+    current_alias = manager.current_alias()
+
+    def sort_key(row: dict[str, Any]) -> tuple[int, float, float, str]:
+        alias = str(row["alias"])
+        alias_state = state.get(alias, {})
+        last_success = float(alias_state.get("last_success", 0.0))
+        last_attempt = float(alias_state.get("last_attempt", 0.0))
+        return (
+            0 if alias == current_alias else 1,
+            last_success,
+            last_attempt,
+            alias,
+        )
+
+    for row in sorted(candidates, key=sort_key):
+        alias = str(row["alias"])
+        alias_state = state.setdefault(alias, {})
+        backoff_until = float(alias_state.get("backoff_until", 0.0))
+        if now < backoff_until:
+            continue
+        last_attempt = float(alias_state.get("last_attempt", 0.0))
+        if now - last_attempt < WATCH_USAGE_REFRESH_INTERVAL_SECONDS:
+            continue
+        alias_state["last_attempt"] = now
+        try:
+            quota = manager.get_account_quota(alias, usage_mode="foreground")
+        except ClaudeSelectError as exc:
+            message = str(exc)
+            alias_state["last_error"] = message
+            if _is_rate_limited_error(message):
+                failures = int(alias_state.get("rate_limit_failures", 0)) + 1
+                alias_state["rate_limit_failures"] = failures
+                alias_state["backoff_until"] = now + (
+                    WATCH_USAGE_ALIAS_RATE_LIMIT_BACKOFF_SECONDS * min(failures, 4)
+                )
+                state["_global"] = {
+                    "backoff_until": now + WATCH_USAGE_GLOBAL_RATE_LIMIT_BACKOFF_SECONDS,
+                    "last_error": message,
+                }
+                return (
+                    f"Usage API rate-limited while refreshing {alias}. "
+                    "Applying global and per-alias backoff."
+                )
+            return f"Usage refresh failed for {alias}: {message}"
+        if quota["available"]:
+            alias_state["last_success"] = now
+            alias_state["last_error"] = None
+            alias_state["rate_limit_failures"] = 0
+            alias_state["backoff_until"] = 0.0
+            return f"Refreshed usage for {alias}."
+        return f"Usage still unavailable for {alias}."
+    return None
+
+
+def _watch_usage_global_backoff_until(state: dict[str, dict[str, Any]]) -> float:
+    global_state = state.get("_global", {})
+    return float(global_state.get("backoff_until", 0.0))
+
+
+def _is_rate_limited_error(message: str) -> bool:
+    lowered = message.lower()
+    return "too many requests" in lowered or "429" in lowered
 
 
 def _build_usage_diagnostics_panel(

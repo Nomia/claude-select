@@ -80,9 +80,30 @@ class FakeAuthBackend(ClaudeAuthBackend):
 class FakeUsageProvider(UsageProvider):
     def __init__(self):
         self.calls: list[str] = []
+        self.cached_payload: dict[str, object] | None = None
 
     def get_usage(self, snapshot: AuthSnapshot, cache_key: str):
         self.calls.append(cache_key)
+        return {
+            "five_hour": {
+                "used_percentage": 24.0,
+                "resets_at": "2099-01-01T05:00:00Z",
+            },
+            "seven_day": {
+                "used_percentage": 41.0,
+                "resets_at": "2099-01-07T00:00:00Z",
+            },
+            "seven_day_opus": None,
+            "extra_usage": None,
+            "fetched_at": "2099-01-01T00:00:00Z",
+            "stale": False,
+            "error": None,
+        }
+
+    def get_cached_usage(self, cache_key: str, *, stale_after_seconds: int | None = None):
+        self.calls.append(f"cached:{cache_key}")
+        if self.cached_payload is not None:
+            return copy.deepcopy(self.cached_payload)
         return {
             "five_hour": {
                 "used_percentage": 24.0,

@@ -25,6 +25,14 @@ class UsageProvider(Protocol):
     def get_usage(self, snapshot: AuthSnapshot, cache_key: str) -> dict[str, Any]:
         """Return structured usage data for one auth snapshot."""
 
+    def get_cached_usage(
+        self,
+        cache_key: str,
+        *,
+        stale_after_seconds: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Return cached structured usage data without triggering a remote fetch."""
+
 
 class OAuthUsageProvider:
     """Fetch OAuth-backed quota usage with a small local cache."""
@@ -45,14 +53,11 @@ class OAuthUsageProvider:
     def get_usage(self, snapshot: AuthSnapshot, cache_key: str) -> dict[str, Any]:
         """Return structured usage data, preferring fresh cache when available."""
         now_epoch = int(time.time())
-        cached = self.registry.get_usage_cache(
+        cached = self.get_cached_usage(
             cache_key,
-            max_age_seconds=self.cache_ttl_seconds,
-            now_epoch=now_epoch,
+            stale_after_seconds=self.cache_ttl_seconds,
         )
-        if cached is not None:
-            cached["stale"] = False
-            cached["cache_age_seconds"] = 0
+        if cached is not None and not cached.get("stale"):
             return cached
 
         token = self._access_token(snapshot)
@@ -80,6 +85,28 @@ class OAuthUsageProvider:
                 stale["error"] = str(exc)
                 return stale
             raise UsageUnavailableError(f"Unable to fetch usage data: {exc}") from exc
+
+    def get_cached_usage(
+        self,
+        cache_key: str,
+        *,
+        stale_after_seconds: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Return cached usage data annotated with staleness without remote fetch."""
+        now_epoch = int(time.time())
+        cached = self.registry.get_usage_cache(
+            cache_key,
+            max_age_seconds=None,
+            now_epoch=now_epoch,
+        )
+        if cached is None:
+            return None
+        fetched_at = self._epoch_from_iso(str(cached.get("fetched_at", "") or "")) or now_epoch
+        age = max(now_epoch - fetched_at, 0)
+        stale_limit = self.cache_ttl_seconds if stale_after_seconds is None else stale_after_seconds
+        cached["stale"] = age > stale_limit
+        cached["cache_age_seconds"] = age
+        return cached
 
     def _fetch_remote(self, token: str) -> dict[str, Any]:
         request = urllib.request.Request(

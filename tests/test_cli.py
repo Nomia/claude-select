@@ -401,7 +401,7 @@ def test_build_panels_for_empty_and_error_state(
     monkeypatch.setattr(
         manager,
         "current_live_account",
-        lambda: (_ for _ in ()).throw(ClaudeSelectError("bad live state")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(ClaudeSelectError("bad live state")),
     )
 
     panel = cli._build_current_account_panel(manager)
@@ -754,6 +754,47 @@ def test_watch_auto_refresh_helper(registry, fake_auth_backend, fake_usage_provi
     assert message is not None
     assert "Auto-refreshed work" in message
     assert fake_auth_backend.print_prompts == ["ping"]
+
+
+def test_watch_usage_refresh_rate_limits_with_backoff(
+    monkeypatch, registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    rows = [
+        {
+            "alias": "work",
+            "auth_kind": "cli_snapshot",
+            "kind_label": "cli",
+            "available": True,
+            "stale": True,
+        }
+    ]
+
+    def boom(alias: str, **kwargs):
+        raise ClaudeSelectError("Usage API request failed: Too Many Requests")
+
+    monkeypatch.setattr(manager, "get_account_quota", boom)
+
+    state: dict[str, dict[str, object]] = {}
+    message = cli._maybe_refresh_watch_usage(manager, rows=rows, state=state, now=1000.0)
+
+    assert message is not None
+    assert "rate-limited" in message
+    assert state["work"]["backoff_until"] == (
+        1000.0 + cli.WATCH_USAGE_ALIAS_RATE_LIMIT_BACKOFF_SECONDS
+    )
+    assert state["_global"]["backoff_until"] == (
+        1000.0 + cli.WATCH_USAGE_GLOBAL_RATE_LIMIT_BACKOFF_SECONDS
+    )
+
+    message = cli._maybe_refresh_watch_usage(manager, rows=rows, state=state, now=1001.0)
+    assert message is not None
+    assert "backing off globally" in message
 
 
 def test_watch_hint_panel_for_expired_account(registry, fake_auth_backend, fake_usage_provider):

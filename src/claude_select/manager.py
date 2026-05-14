@@ -82,6 +82,8 @@ class AuthManager:
         include_usage: bool = False,
         *,
         auto_refresh: bool = False,
+        usage_mode: str = "foreground",
+        usage_stale_after_seconds: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return account records as dictionaries for CLI/SDK output."""
         if auto_refresh:
@@ -93,7 +95,12 @@ class AuthManager:
             payload["status"] = record.status(now)
             payload["expires_in"] = record.expires_in(now)
             if include_usage:
-                quota = self.get_account_quota(record.alias, auto_refresh=False)
+                quota = self.get_account_quota(
+                    record.alias,
+                    auto_refresh=False,
+                    usage_mode=usage_mode,
+                    usage_stale_after_seconds=usage_stale_after_seconds,
+                )
                 payload.update(
                     {
                         "usage": quota["usage"],
@@ -126,22 +133,36 @@ class AuthManager:
         include_usage: bool = False,
         *,
         auto_refresh: bool = False,
+        usage_mode: str = "foreground",
+        usage_stale_after_seconds: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return only CLI-backed accounts."""
         return [
             row
-            for row in self.list_accounts(include_usage=include_usage, auto_refresh=auto_refresh)
+            for row in self.list_accounts(
+                include_usage=include_usage,
+                auto_refresh=auto_refresh,
+                usage_mode=usage_mode,
+                usage_stale_after_seconds=usage_stale_after_seconds,
+            )
             if row["auth_kind"] == AUTH_KIND_CLI_SNAPSHOT
         ]
 
     def list_token_accounts(
         self,
         include_usage: bool = False,
+        *,
+        usage_mode: str = "foreground",
+        usage_stale_after_seconds: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return only token-only accounts."""
         return [
             row
-            for row in self.list_accounts(include_usage=include_usage)
+            for row in self.list_accounts(
+                include_usage=include_usage,
+                usage_mode=usage_mode,
+                usage_stale_after_seconds=usage_stale_after_seconds,
+            )
             if row["auth_kind"] == AUTH_KIND_TOKEN
         ]
 
@@ -571,7 +592,13 @@ class AuthManager:
         """Return the last selected CLI alias if any."""
         return self.registry.get_current_alias()
 
-    def current_live_account(self) -> dict[str, Any]:
+    def current_live_account(
+        self,
+        *,
+        include_usage: bool = True,
+        usage_mode: str = "foreground",
+        usage_stale_after_seconds: int | None = None,
+    ) -> dict[str, Any]:
         """Return the current Claude live auth state with optional registry match."""
         snapshot = self.auth_backend.read_snapshot()
         oauth_account = snapshot.oauth_account
@@ -594,10 +621,14 @@ class AuthManager:
             payload["auth_method"] = auth_status.get("authMethod")
             payload["api_provider"] = auth_status.get("apiProvider")
             payload["subscription_type"] = auth_status.get("subscriptionType")
-        usage = self._usage_for_snapshot(
-            snapshot,
-            payload["matched_alias"] or self._usage_cache_key_for_snapshot(snapshot),
-        )
+        usage = None
+        if include_usage:
+            usage = self._usage_for_snapshot(
+                snapshot,
+                payload["matched_alias"] or self._usage_cache_key_for_snapshot(snapshot),
+                usage_mode=usage_mode,
+                usage_stale_after_seconds=usage_stale_after_seconds,
+            )
         payload["usage"] = usage
         payload["quota_5h_left"] = self._format_window_remaining(usage, "five_hour")
         payload["quota_5h_reset"] = self._format_window_reset(usage, "five_hour")
@@ -625,6 +656,8 @@ class AuthManager:
         alias: str,
         *,
         auto_refresh: bool = False,
+        usage_mode: str = "foreground",
+        usage_stale_after_seconds: int | None = None,
     ) -> dict[str, Any]:
         """Return quota details for one stored account alias."""
         details = self.get_account(alias, auto_refresh=auto_refresh)
@@ -641,7 +674,11 @@ class AuthManager:
                 usage=None,
                 unsupported_reason="quota unsupported for long-lived token entries",
             )
-        usage = self._usage_for_alias(details.record.alias)
+        usage = self._usage_for_alias(
+            details.record.alias,
+            usage_mode=usage_mode,
+            usage_stale_after_seconds=usage_stale_after_seconds,
+        )
         return self._quota_payload(
             alias=details.record.alias,
             email=details.record.email,
@@ -1037,9 +1074,20 @@ class AuthManager:
             or before.credentials != after.credentials
         )
 
-    def _usage_for_alias(self, alias: str) -> dict[str, Any] | None:
+    def _usage_for_alias(
+        self,
+        alias: str,
+        *,
+        usage_mode: str = "foreground",
+        usage_stale_after_seconds: int | None = None,
+    ) -> dict[str, Any] | None:
         details = self.registry.get_account(alias)
-        return self._usage_for_snapshot(details.snapshot, f"alias:{alias}")
+        return self._usage_for_snapshot(
+            details.snapshot,
+            f"alias:{alias}",
+            usage_mode=usage_mode,
+            usage_stale_after_seconds=usage_stale_after_seconds,
+        )
 
     def _maybe_auto_refresh_alias(self, alias: str) -> AccountDetails:
         """Refresh one CLI alias on demand when it is expiring or expired."""
@@ -1109,9 +1157,24 @@ class AuthManager:
             return True
         return float(used) >= limit
 
-    def _usage_for_snapshot(self, snapshot: AuthSnapshot, cache_key: str) -> dict[str, Any] | None:
+    def _usage_for_snapshot(
+        self,
+        snapshot: AuthSnapshot,
+        cache_key: str,
+        *,
+        usage_mode: str = "foreground",
+        usage_stale_after_seconds: int | None = None,
+    ) -> dict[str, Any] | None:
         resolved_key = cache_key if cache_key.startswith("alias:") else f"live:{cache_key}"
         try:
+            if usage_mode == "cache_only":
+                get_cached = getattr(self.usage_provider, "get_cached_usage", None)
+                if callable(get_cached):
+                    return get_cached(
+                        resolved_key,
+                        stale_after_seconds=usage_stale_after_seconds,
+                    )
+                return None
             return self.usage_provider.get_usage(snapshot, resolved_key)
         except Exception:
             return None
