@@ -87,40 +87,7 @@ work   cli   a@company.com    Team A        healthy  7h 57m      -              
 Add another account? [Y/n] y
 ```
 
-### 2. 可选：录入长期 SDK token
-
-如果你想给 Python 程序显式使用一个长期 token，可以执行。若 alias 已经是一个
-CLI 账号，`add-token` 会把长期 token 挂到这个 alias 上，而不是覆盖它；在表格里会显示成
-`cli+token`：
-
-```bash
-claude-select add-token work
-```
-
-`add-token` 会启动 `claude setup-token`，尽量从终端输出里自动抓取 token，然后把它保存成一个简单的 SDK 凭证。由于这类官方长期 token 是 inference-only，profile metadata 探测只是 best-effort，失败时会回退到人工输入。
-
-### `add-token` 实际交互示例
-
-```bash
-$ claude-select add-token work
-Launching `claude setup-token` in this terminal.
-Complete authorization. When the token is printed, copy it and return here.
-Detected the long-lived token from setup-token output.
-Validated token for SDK/program use.
-Profile metadata is unavailable for this token scope.
-Email: a@company.com
-Organization (optional): Team A
-Captured work <a@company.com> [Team A].
-Status: healthy
-Expires in: 364d
-
-Current registry:
-Alias  Kind       Email            Organization  Status   Expires In  Last Selected  Last Synced
------  ---------  ---------------  ------------  -------  ----------  -------------  -----------
-work   cli+token  a@company.com    Team A        healthy  7h 57m      -              just now
-```
-
-### 3. 查看当前存储内容
+### 2. 查看当前存储内容
 
 ```bash
 claude-select list
@@ -190,7 +157,7 @@ Heads up
 
 加上 `--usage` 之后，`cli` 条目会显示 5h / 7d quota；`token` 条目会显示 `n/a`，因为 inference-only token 拿不到 quota/profile 接口。如果某个值后面带 `~`，表示这次显示的是本地旧缓存，最新 usage 拉取失败或被限流了。
 
-### 4. 给 Claude CLI 切换当前账号
+### 3. 给 Claude CLI 切换当前账号
 
 ```bash
 claude-select select work
@@ -218,7 +185,7 @@ Current CLI alias: work
 claude-select refresh <alias>
 ```
 
-### 5. 在 Python 里使用某个条目
+### 4. 在 Python 里使用某个条目
 
 ```python
 from claude_select import AuthManager
@@ -241,6 +208,18 @@ Python 这边和 CLI 共用同一份本地 registry，但它不会改写 Claude 
 
 - [Python SDK Guide](./docs/python-sdk.md)
 - [Python SDK 中文指南](./docs/python-sdk.zh-CN.md)
+
+## 可选：录入长期 SDK Token
+
+如果你只是想给 Python 或 SDK 显式使用一个长期 `claude setup-token`，可以在后面再补：
+
+```bash
+claude-select add-token work
+```
+
+如果 alias 已经是一个 CLI 账号，`add-token` 会把长期 token 挂到这个 alias 上，表格里会显示成 `cli+token`。
+
+`add-token` 会启动 `claude setup-token`，尽量从终端输出里自动抓取 token，然后把它保存成一个简单的 SDK 凭证。由于这类官方长期 token 是 inference-only，profile metadata 探测只是 best-effort，失败时会回退到人工输入。
 
 ## CLI 命令 🧰
 

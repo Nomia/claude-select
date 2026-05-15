@@ -87,40 +87,7 @@ work   cli   a@company.com    Team A        healthy  7h 57m      -              
 Add another account? [Y/n] y
 ```
 
-### 2. Optionally add a long-lived SDK token
-
-You can store a `claude setup-token` token for explicit Python usage. If the alias
-already exists as a CLI account, the token is attached to that alias and the row
-will appear as `cli+token` in the registry:
-
-```bash
-claude-select add-token work
-```
-
-`add-token` launches `claude setup-token`, tries to detect the token from terminal output, then stores it as a simple SDK credential. Because these official long-lived tokens are inference-only, profile metadata detection is best-effort and may fall back to manual prompts.
-
-### What `add-token` looks like
-
-```bash
-$ claude-select add-token work
-Launching `claude setup-token` in this terminal.
-Complete authorization. When the token is printed, copy it and return here.
-Detected the long-lived token from setup-token output.
-Validated token for SDK/program use.
-Profile metadata is unavailable for this token scope.
-Email: a@company.com
-Organization (optional): Team A
-Captured work <a@company.com> [Team A].
-Status: healthy
-Expires in: 364d
-
-Current registry:
-Alias  Kind       Email            Organization  Status   Expires In  Last Selected  Last Synced
------  ---------  ---------------  ------------  -------  ----------  -------------  -----------
-work   cli+token  a@company.com    Team A        healthy  7h 57m      -              just now
-```
-
-### 3. See what is stored
+### 2. See what is stored
 
 ```bash
 claude-select list
@@ -190,7 +157,7 @@ Heads up
 
 With `--usage`, `cli` entries show 5h/7d quota data and `token` entries show `n/a` because inference-only tokens do not expose quota/profile endpoints. If a value ends with `~`, it came from a stale cache because the latest usage fetch failed or was rate-limited.
 
-### 4. Select an account for Claude CLI
+### 3. Select an account for Claude CLI
 
 ```bash
 claude-select select work
@@ -218,7 +185,7 @@ If the selected CLI alias is already expired, `select` still writes it back into
 claude-select refresh <alias>
 ```
 
-### 5. Use an entry in Python
+### 4. Use an entry in Python
 
 ```python
 from claude_select import AuthManager
@@ -240,6 +207,18 @@ The Python side reads from the same local registry, but it does **not** mutate C
 Full Python SDK guide:
 
 - [Python SDK Guide](./docs/python-sdk.md)
+
+## Optional SDK Token
+
+If you explicitly want to store a long-lived `claude setup-token` token for Python or SDK use, you can add it later:
+
+```bash
+claude-select add-token work
+```
+
+If the alias already exists as a CLI account, the token is attached to that alias and the row appears as `cli+token`.
+
+`add-token` launches `claude setup-token`, tries to detect the token from terminal output, then stores it as a simple SDK credential. Because these official long-lived tokens are inference-only, profile metadata detection is best-effort and may fall back to manual prompts.
 
 ## CLI Commands 🧰
 
