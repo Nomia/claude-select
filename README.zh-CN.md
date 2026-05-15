@@ -125,23 +125,70 @@ work   cli+token  a@company.com    Team A        healthy  7h 57m      -         
 ```bash
 claude-select list
 claude-select list --usage
+claude-select usage work
 claude-select whoami
 claude-select watch
 claude-select watch --usage
 claude-select watch --auto-refresh
 ```
 
-展示效果大致如下：
+`list --usage` 示例：
 
-```text
-Alias     Kind   Email             Organization    Status          Expires In  Last Selected  Last Synced
---------  -----  ----------------  --------------  --------------  ----------  -------------  -----------
-personal  cli    a@example.com     Personal        healthy         18h 12m     2h ago         15m ago
-work      cli    b@company.com     Team A          expiring_soon   1h 05m      -              6m ago
-work-sdk  token  b@company.com     Team A          healthy         364d        -              just now
+```bash
+$ claude-select list --usage
+Alias        Kind       Email                      Organization   Status         Expires In  Last Selected  Last Synced  5h Left  5h Reset  7d Left  7d Reset
+-----------  ---------  -------------------------  -------------  -------------  ----------  -------------  -----------  -------  --------  -------  --------
+team-am      cli        alice.lee@example.com      Automizely     expiring_soon  13m         11h ago        42m ago      44.0%    3h 5m     80.0%    6d 6h
+team-as      cli        alice.lee@example.com      AfterShip      expiring_soon  13m         1d ago         just now     44.0%    3h 5m     80.0%    6d 6h
+consulting   cli        bob.chen@example.com       Studio North   healthy        6h 7m       11h ago        1h ago       41.0%    3h 5m     81.0%    4d 12h
+sdk-bot      token      sdk.bot@example.com        Automation     healthy        364d        -              just now     n/a      n/a       n/a      n/a
 ```
 
-加上 `--usage` 之后，`cli` 条目会显示 5h / 7d quota；`token` 条目会显示 `n/a`，因为 inference-only token 拿不到 quota/profile 接口。
+`whoami` 示例：
+
+```bash
+$ claude-select whoami
+Current Claude live account
+  matched alias: team-as
+  email: alice.lee@example.com
+  organization: AfterShip
+  expires in: 13m
+  auth method: claude.ai
+  subscription: team
+  5h quota left: 44.0%
+  5h resets in: 3h 5m
+  7d quota left: 80.0%
+  7d resets in: 6d 6h
+  target: config: /Users/you/.claude.json
+  target: credentials store: macOS Keychain (Claude Code-credentials/you)
+```
+
+`watch --usage` 示例：
+
+```text
+Current Claude live account
+  matched alias: team-as
+  email: alice.lee@example.com
+  organization: AfterShip
+  expires in: 13m
+  auth method: claude.ai
+  subscription: team
+
+Local account registry
+Alias        Kind  Email                  Organization  Status         Expires In  Last Selected  Last Synced  5h Left  5h Reset  7d Left  7d Reset
+-----------  ----  ---------------------  ------------  -------------  ----------  -------------  -----------  -------  --------  -------  --------
+team-am      cli   alice.lee@example.com  Automizely    expiring_soon  13m         11h ago        42m ago      44.0%    3h 5m     80.0%    6d 6h
+team-as      cli   alice.lee@example.com  AfterShip     expiring_soon  13m         1d ago         just now     44.0%    3h 5m     80.0%    6d 6h
+consulting   cli   bob.chen@example.com   Studio North  healthy        6h 7m       11h ago        1h ago       41.0%    3h 5m     81.0%    4d 12h
+
+Heads up
+  Some CLI accounts are close to expiry.
+  No manual refresh is needed yet.
+
+  Tip: run `claude-select watch --auto-refresh` to let watch try refresh right around expiry.
+```
+
+加上 `--usage` 之后，`cli` 条目会显示 5h / 7d quota；`token` 条目会显示 `n/a`，因为 inference-only token 拿不到 quota/profile 接口。如果某个值后面带 `~`，表示这次显示的是本地旧缓存，最新 usage 拉取失败或被限流了。
 
 ### 4. 给 Claude CLI 切换当前账号
 
@@ -205,9 +252,11 @@ claude-select refresh [alias]
 claude-select relogin <alias>
 claude-select list
 claude-select list --usage
+claude-select usage <alias>
 claude-select watch
 claude-select select [alias]
 claude-select sync-current
+claude-select rename <old-alias> <new-alias>
 claude-select remove <alias>
 claude-select export-env <alias> --json
 claude-select current
@@ -219,16 +268,18 @@ claude-select whoami
 - `init`：首次引导录入多个 CLI 账号，结束后可选进入 token 录入阶段
 - `add`：默认先在当前终端启动 `claude auth login`，展示当前 `claude auth status` 让你确认后，再把当前登录态录进 registry
 - `add-token`：默认先在当前终端启动 `claude setup-token`，然后把长期 token 存进 registry，供 SDK / 程序显式使用；如果 alias 已存在为 CLI 账号，就把 token 挂到该 alias 上
-- `refresh`：对一个 CLI alias 或所有即将过期/已过期的 CLI alias 走轻量恢复路径：`select -> claude -p "ping" -> sync-current`
+- `refresh`：对一个 CLI alias 或所有已过期的 CLI alias 走轻量恢复路径：`select -> claude -p "ping" -> sync-current`；手动 refresh 只有在 token 真正到期时才有意义
 - `relogin`：默认先在当前终端启动 `claude auth login`，展示当前 `claude auth status` 让你确认后，再用新的登录态覆盖某个已保存的 `cli` 条目
 - `list`：查看当前 registry，并先对当前 live account 做一次轻量同步
 - `list --usage`：拉取并显示 `cli` 条目的 5h / 7d quota；`token` 条目显示 `n/a`
+- `usage`：单独查看一个 alias 的 5h / 7d quota；如果最新拉取失败，会附带 stale / error 诊断信息
 - `watch`：用 Rich live view 持续显示当前 Claude live account 和本地 registry，并定期同步当前 live state
 - `watch --usage`：在 live registry 表格中额外显示 5h / 7d quota 列
-- `watch --auto-refresh`：显式开启自动 `refresh`，在 watch 循环里尝试恢复已过期或即将过期的 CLI 账号
+- `watch --auto-refresh`：显式开启自动 `refresh`，只会在过期前约 5 秒到过期后约 10 秒的临界窗口里尝试恢复
 - `watch` 运行时可按 `q` 或 `Esc` 干净退出
 - `select`：把某个已保存的 `cli` 快照写回当前 Claude CLI 登录态
 - `sync-current`：读取当前 Claude live auth state，把已经被 Claude 自动刷新的 token 同步回匹配的 `cli` 记录
+- `rename`：只改 alias 名称，不改底层账号快照或挂载的 token
 - `remove`：删除某个条目
 - `export-env`：输出给 Claude Agent SDK 使用的环境变量
 - `current`：显示最近一次给 CLI 选中的账号别名

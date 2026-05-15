@@ -125,23 +125,70 @@ work   cli+token  a@company.com    Team A        healthy  7h 57m      -         
 ```bash
 claude-select list
 claude-select list --usage
+claude-select usage work
 claude-select whoami
 claude-select watch
 claude-select watch --usage
 claude-select watch --auto-refresh
 ```
 
-Example table:
+Example `list --usage`:
 
-```text
-Alias     Kind   Email             Organization    Status          Expires In  Last Selected  Last Synced
---------  -----  ----------------  --------------  --------------  ----------  -------------  -----------
-personal  cli    a@example.com     Personal        healthy         18h 12m     2h ago         15m ago
-work      cli    b@company.com     Team A          expiring_soon   1h 05m      -              6m ago
-work-sdk  token  b@company.com     Team A          healthy         364d        -              just now
+```bash
+$ claude-select list --usage
+Alias        Kind       Email                      Organization   Status         Expires In  Last Selected  Last Synced  5h Left  5h Reset  7d Left  7d Reset
+-----------  ---------  -------------------------  -------------  -------------  ----------  -------------  -----------  -------  --------  -------  --------
+team-am      cli        alice.lee@example.com      Automizely     expiring_soon  13m         11h ago        42m ago      44.0%    3h 5m     80.0%    6d 6h
+team-as      cli        alice.lee@example.com      AfterShip      expiring_soon  13m         1d ago         just now     44.0%    3h 5m     80.0%    6d 6h
+consulting   cli        bob.chen@example.com       Studio North   healthy        6h 7m       11h ago        1h ago       41.0%    3h 5m     81.0%    4d 12h
+sdk-bot      token      sdk.bot@example.com        Automation     healthy        364d        -              just now     n/a      n/a       n/a      n/a
 ```
 
-With `--usage`, `cli` entries show 5h/7d quota data and `token` entries show `n/a` because inference-only tokens do not expose quota/profile endpoints.
+Example `whoami`:
+
+```bash
+$ claude-select whoami
+Current Claude live account
+  matched alias: team-as
+  email: alice.lee@example.com
+  organization: AfterShip
+  expires in: 13m
+  auth method: claude.ai
+  subscription: team
+  5h quota left: 44.0%
+  5h resets in: 3h 5m
+  7d quota left: 80.0%
+  7d resets in: 6d 6h
+  target: config: /Users/you/.claude.json
+  target: credentials store: macOS Keychain (Claude Code-credentials/you)
+```
+
+Example `watch --usage`:
+
+```text
+Current Claude live account
+  matched alias: team-as
+  email: alice.lee@example.com
+  organization: AfterShip
+  expires in: 13m
+  auth method: claude.ai
+  subscription: team
+
+Local account registry
+Alias        Kind  Email                  Organization  Status         Expires In  Last Selected  Last Synced  5h Left  5h Reset  7d Left  7d Reset
+-----------  ----  ---------------------  ------------  -------------  ----------  -------------  -----------  -------  --------  -------  --------
+team-am      cli   alice.lee@example.com  Automizely    expiring_soon  13m         11h ago        42m ago      44.0%    3h 5m     80.0%    6d 6h
+team-as      cli   alice.lee@example.com  AfterShip     expiring_soon  13m         1d ago         just now     44.0%    3h 5m     80.0%    6d 6h
+consulting   cli   bob.chen@example.com   Studio North  healthy        6h 7m       11h ago        1h ago       41.0%    3h 5m     81.0%    4d 12h
+
+Heads up
+  Some CLI accounts are close to expiry.
+  No manual refresh is needed yet.
+
+  Tip: run `claude-select watch --auto-refresh` to let watch try refresh right around expiry.
+```
+
+With `--usage`, `cli` entries show 5h/7d quota data and `token` entries show `n/a` because inference-only tokens do not expose quota/profile endpoints. If a value ends with `~`, it came from a stale cache because the latest usage fetch failed or was rate-limited.
 
 ### 4. Select an account for Claude CLI
 
@@ -204,9 +251,11 @@ claude-select refresh [alias]
 claude-select relogin <alias>
 claude-select list
 claude-select list --usage
+claude-select usage <alias>
 claude-select watch
 claude-select select [alias]
 claude-select sync-current
+claude-select rename <old-alias> <new-alias>
 claude-select remove <alias>
 claude-select export-env <alias> --json
 claude-select current
@@ -218,16 +267,18 @@ Command behavior:
 - `init`: guided multi-account bootstrap for CLI accounts, then optional token capture phase
 - `add`: launch `claude auth login` in the current terminal by default, show the current `claude auth status`, then capture the confirmed login into the registry
 - `add-token`: launch `claude setup-token` in the current terminal by default, then store a long-lived token for explicit SDK/program use; if the alias already exists as a CLI account, the token is attached to that alias
-- `refresh`: try the lightweight recovery path for one CLI alias or all expired/expiring aliases by doing `select -> claude -p "ping" -> sync-current`
+- `refresh`: try the lightweight recovery path for one CLI alias or all expired CLI aliases by doing `select -> claude -p "ping" -> sync-current`; manual refresh is only useful once the token is actually at expiry
 - `relogin`: launch `claude auth login` in the current terminal by default, show the current `claude auth status`, then overwrite one stored CLI alias after the user logs in again
 - `list`: show the current registry table and do a light sync of the current live account first
 - `list --usage`: fetch and display 5h / 7d quota information for `cli` entries; `token` entries show `n/a`
+- `usage`: show 5h / 7d quota for one alias, with stale/error diagnostics when the latest fetch did not succeed
 - `watch`: keep a live Rich-powered view of the current Claude live account plus the local registry, with periodic live-state sync
 - `watch --usage`: include 5h / 7d quota columns in the live registry table
-- `watch --auto-refresh`: opt in to automatic `refresh` attempts for expired or expiring CLI accounts while the watch loop is running
+- `watch --auto-refresh`: opt in to automatic `refresh` attempts only in the narrow expiry window, from about 5 seconds before expiry to about 10 seconds after expiry
 - while `watch` is running, press `q` or `Esc` to exit cleanly
 - `select`: write one stored `cli` snapshot back into Claude's live auth state
 - `sync-current`: read Claude's current live auth state and sync any refreshed token data back into the matching `cli` registry entry
+- `rename`: rename an alias without changing the underlying account snapshot or token attachment
 - `remove`: delete one stored entry
 - `export-env`: print SDK env vars for one alias
 - `current`: show the last alias selected for CLI use
