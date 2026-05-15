@@ -733,21 +733,23 @@ def test_watch_auto_refresh_helper(registry, fake_auth_backend, fake_usage_provi
         auth_backend=fake_auth_backend,
         usage_provider=fake_usage_provider,
     )
-    account = manager.capture_current_account("work")
+    manager.capture_current_account("work")
+    details = manager.get_account("work")
     manager.registry.upsert_account(
         alias="work",
-        auth_kind=account["auth_kind"],
-        email=account["email"],
-        organization_name=account["organization_name"],
-        organization_id=account["organization_id"],
-        account_uuid=account["account_uuid"],
-        captured_at=account["captured_at"],
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
         expires_at=0,
-        last_selected_at=account["last_selected_at"],
-        source=account["source"],
-        snapshot=manager.get_account("work").snapshot,
-        last_synced_at=account["last_synced_at"],
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
     )
+    manager.auto_refresh_candidates = lambda: ["work"]  # type: ignore[method-assign]
 
     message = cli._maybe_auto_refresh_accounts(manager, {}, 1000.0)
 
@@ -866,8 +868,52 @@ def test_watch_hint_panel_for_expiring_account_mentions_auto_refresh(
     hint = cli._build_watch_hint_panel(manager)
 
     assert hint is not None
-    assert "Recommended: claude-select refresh work" in str(hint.renderable)
+    assert "No manual refresh is needed yet." in str(hint.renderable)
+    assert "claude-select refresh work" not in str(hint.renderable)
     assert "claude-select watch --auto-refresh" in str(hint.renderable)
+
+
+def test_watch_hint_panel_for_expiring_account_with_auto_refresh(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.list_accounts = lambda include_usage=False: [  # type: ignore[method-assign]
+        {
+            "alias": "work",
+            "auth_kind": "cli",
+            "kind_label": "cli",
+            "status": "expiring_soon",
+        }
+    ]
+
+    hint = cli._build_watch_hint_panel(manager, auto_refresh=True)
+
+    assert hint is not None
+    assert "right around expiry" in str(hint.renderable)
+
+
+def test_watch_sleep_seconds_uses_fast_poll_near_expiry():
+    now = 1_700_000_000
+    rows = [
+        {
+            "alias": "work",
+            "auth_kind": "cli_snapshot",
+            "kind_label": "cli",
+            "expires_at": int((now + 30) * 1000),
+        }
+    ]
+
+    original = cli.time.time
+    cli.time.time = lambda: now
+    try:
+        assert cli._watch_sleep_seconds(rows, interval=30, auto_refresh=True) == 1
+        assert cli._watch_sleep_seconds(rows, interval=30, auto_refresh=False) == 30
+    finally:
+        cli.time.time = original
 
 
 def test_cli_sync_current(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
@@ -905,6 +951,27 @@ def test_confirm_current_auth_status_accepts(
     assert "organization: Example Org" in output
 
 
+def test_confirm_current_auth_status_skips_matching_relogin_prompt(
+    capsys, registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+
+    def unexpected_input(_prompt=""):
+        raise AssertionError("input should not be called for matching relogin")
+
+    monkeypatch.setattr("builtins.input", unexpected_input)
+
+    cli._confirm_current_auth_status(manager, alias="work", action="relogin")
+
+    output = capsys.readouterr().out
+    assert output == ""
+
+
 def test_confirm_current_auth_status_rejects(
     registry, fake_auth_backend, fake_usage_provider, monkeypatch
 ):
@@ -917,6 +984,26 @@ def test_confirm_current_auth_status_rejects(
 
     with pytest.raises(ClaudeSelectError):
         cli._confirm_current_auth_status(manager, alias="work", action="capture")
+
+
+def test_confirm_current_auth_status_still_prompts_for_mismatched_relogin(
+    capsys, registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    fake_auth_backend.auth_status_payload["email"] = "other@example.com"
+    fake_auth_backend.auth_status_payload["orgName"] = "Other Org"
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "")
+
+    cli._confirm_current_auth_status(manager, alias="work", action="relogin")
+
+    output = capsys.readouterr().out
+    assert "Current Claude auth status:" in output
+    assert "email: other@example.com" in output
 
 
 def test_cli_refresh(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):

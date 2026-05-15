@@ -26,7 +26,6 @@ from claude_select.models import (
     AUTH_KIND_CLI_SNAPSHOT,
     AUTH_KIND_TOKEN,
     STATUS_EXPIRED,
-    STATUS_EXPIRING_SOON,
     AccountDetails,
     AccountRecord,
     AuthSnapshot,
@@ -61,6 +60,9 @@ TOKEN_PROFILE_BETA_HEADER = "oauth-2025-04-20"
 
 class AuthManager:
     """Manage local Claude auth snapshots for CLI and SDK consumption."""
+
+    REFRESH_PRE_EXPIRY_WINDOW_SECONDS = 5
+    REFRESH_POST_EXPIRY_WINDOW_SECONDS = 10
 
     def __init__(
         self,
@@ -434,6 +436,14 @@ class AuthManager:
 
         normalized = self._normalize_alias(alias)
         details = self.registry.get_account(normalized)
+        if (
+            details.record.status() != STATUS_EXPIRED
+            and not self._is_within_refresh_probe_window(details.record)
+        ):
+            raise AccountSelectionError(
+                f"Account '{normalized}' is not ready for refresh yet. "
+                "Try again within 5 seconds of expiry or after it expires."
+            )
         original_snapshot = self.auth_backend.read_snapshot()
         original_current_alias = self.current_alias()
         should_restore = self._snapshot_changed(original_snapshot, details.snapshot)
@@ -483,13 +493,24 @@ class AuthManager:
             )
 
     def refresh_candidates(self) -> list[str]:
-        """Return CLI aliases that should be refreshed soon."""
+        """Return CLI aliases that are already expired."""
         rows = self.list_accounts(include_usage=False)
         return [
             str(row["alias"])
             for row in rows
             if row["auth_kind"] == AUTH_KIND_CLI_SNAPSHOT
-            and row["status"] in {STATUS_EXPIRED, "expiring_soon"}
+            and row["status"] == STATUS_EXPIRED
+        ]
+
+    def auto_refresh_candidates(self) -> list[str]:
+        """Return CLI aliases inside the narrow Claude-side refresh window."""
+        now = utc_now()
+        rows = self.list_accounts(include_usage=False)
+        return [
+            str(row["alias"])
+            for row in rows
+            if row["auth_kind"] == AUTH_KIND_CLI_SNAPSHOT
+            and self._is_expires_at_within_refresh_probe_window(row.get("expires_at"), now=now)
         ]
 
     def _activate_cli_account(
@@ -1090,13 +1111,13 @@ class AuthManager:
         )
 
     def _maybe_auto_refresh_alias(self, alias: str) -> AccountDetails:
-        """Refresh one CLI alias on demand when it is expiring or expired."""
+        """Refresh one CLI alias on demand when it is expired."""
         details = self.registry.get_account(alias)
         if details.record.auth_kind != AUTH_KIND_CLI_SNAPSHOT:
             return details
         if details.sdk_token_snapshot is not None:
             return details
-        if details.record.status() not in {STATUS_EXPIRED, STATUS_EXPIRING_SOON}:
+        if details.record.status() != STATUS_EXPIRED:
             return details
         self.refresh_account(alias)
         return self.registry.get_account(alias)
@@ -1108,6 +1129,31 @@ class AuthManager:
                 self.refresh_account(alias)
             except ClaudeSelectError:
                 continue
+
+    @staticmethod
+    def _seconds_until_expiry(expires_at: int | None, *, now: Any | None = None) -> int | None:
+        if expires_at is None:
+            return None
+        current = now or utc_now()
+        return int(expires_at / 1000 - current.timestamp())
+
+    def _is_within_refresh_probe_window(self, record: AccountRecord) -> bool:
+        return self._is_expires_at_within_refresh_probe_window(record.expires_at)
+
+    def _is_expires_at_within_refresh_probe_window(
+        self,
+        expires_at: int | None,
+        *,
+        now: Any | None = None,
+    ) -> bool:
+        remaining = self._seconds_until_expiry(expires_at, now=now)
+        if remaining is None:
+            return False
+        return (
+            -self.REFRESH_POST_EXPIRY_WINDOW_SECONDS
+            <= remaining
+            <= self.REFRESH_PRE_EXPIRY_WINDOW_SECONDS
+        )
 
     @staticmethod
     def _row_has_remaining_quota(row: dict[str, Any]) -> bool:

@@ -25,7 +25,9 @@ from claude_select.exceptions import ClaudeSelectError
 from claude_select.manager import AuthManager
 
 TOKEN_RE = re.compile(r"(sk-ant-oat[0-9A-Za-z._-]+)")
-AUTO_REFRESH_COOLDOWN_SECONDS = 30 * 60
+AUTO_REFRESH_COOLDOWN_SECONDS = 5
+WATCH_NEAR_EXPIRY_FAST_POLL_SECONDS = 60
+WATCH_NEAR_EXPIRY_SLEEP_SECONDS = 1
 WATCH_USAGE_REFRESH_INTERVAL_SECONDS = 5 * 60
 WATCH_USAGE_ALIAS_RATE_LIMIT_BACKOFF_SECONDS = 30 * 60
 WATCH_USAGE_GLOBAL_RATE_LIMIT_BACKOFF_SECONDS = 10 * 60
@@ -610,6 +612,17 @@ def _confirm_current_auth_status(manager: AuthManager, *, alias: str, action: st
     email = str(status.get("email", "") or "-")
     org_name = str(status.get("orgName", "") or "-")
     auth_method = str(status.get("authMethod", "") or "-")
+    if action == "relogin":
+        try:
+            details = manager.get_account(alias)
+        except ClaudeSelectError:
+            details = None
+        if (
+            details is not None
+            and details.record.email == email
+            and details.record.organization_name == org_name
+        ):
+            return
     print("Current Claude auth status:")
     print(f"  email: {email}")
     print(f"  organization: {org_name}")
@@ -748,11 +761,11 @@ def _run_watch(
                     now = time.monotonic()
                     if now - last_sync_monotonic >= max(sync_interval, 1):
                         _best_effort_sync_current(manager)
-                        if auto_refresh:
-                            last_auto_refresh_message = _maybe_auto_refresh_accounts(
-                                manager, auto_refresh_attempts, now
-                            )
                         last_sync_monotonic = now
+                    if auto_refresh:
+                        last_auto_refresh_message = _maybe_auto_refresh_accounts(
+                            manager, auto_refresh_attempts, now
+                        )
                     rows = manager.list_accounts(
                         include_usage=include_usage,
                         usage_mode="cache_only" if include_usage else "foreground",
@@ -786,7 +799,12 @@ def _run_watch(
                         return 0
                     if _watch_exit_requested():
                         return 0
-                    time.sleep(max(interval, 1))
+                    sleep_seconds = _watch_sleep_seconds(
+                        rows,
+                        interval=interval,
+                        auto_refresh=auto_refresh,
+                    )
+                    time.sleep(sleep_seconds)
         except KeyboardInterrupt:
             return 0
 
@@ -891,7 +909,7 @@ def _maybe_auto_refresh_accounts(
 ) -> str | None:
     """Best-effort auto-refresh for watch mode with per-alias cooldown."""
     messages: list[str] = []
-    for alias in manager.refresh_candidates():
+    for alias in manager.auto_refresh_candidates():
         last_attempt = attempts.get(alias)
         if last_attempt is not None and now - last_attempt < AUTO_REFRESH_COOLDOWN_SECONDS:
             continue
@@ -946,16 +964,18 @@ def _build_watch_hint_panel(manager: AuthManager, *, auto_refresh: bool = False)
         if auto_refresh:
             lines = [
                 "Some CLI accounts are close to expiry.",
-                "Auto-refresh is enabled and will try to refresh them during the watch loop.",
+                "Auto-refresh is enabled and will only try the lightweight recovery path "
+                "right around expiry.",
             ]
         else:
-            lines = ["Some CLI accounts are close to expiry."]
-            for alias in expiring_aliases:
-                lines.append(f"Recommended: claude-select refresh {alias}")
-            lines.append("")
+            lines = [
+                "Some CLI accounts are close to expiry.",
+                "No manual refresh is needed yet.",
+                "",
+            ]
             lines.append(
                 "Tip: run `claude-select watch --auto-refresh` "
-                "to let watch try refresh automatically."
+                "to let watch try refresh right around expiry."
             )
         return Panel("\n".join(lines), title="Heads up", expand=True)
 
@@ -1093,6 +1113,27 @@ def _watch_usage_global_backoff_until(state: dict[str, dict[str, Any]]) -> float
 def _is_rate_limited_error(message: str) -> bool:
     lowered = message.lower()
     return "too many requests" in lowered or "429" in lowered
+
+
+def _watch_sleep_seconds(
+    rows: list[dict[str, Any]],
+    *,
+    interval: int,
+    auto_refresh: bool,
+) -> int:
+    if not auto_refresh:
+        return max(interval, 1)
+    now = time.time()
+    for row in rows:
+        if "cli" not in str(row.get("kind_label") or row.get("auth_kind", "")).lower():
+            continue
+        expires_at = row.get("expires_at")
+        if not isinstance(expires_at, int):
+            continue
+        remaining = int(expires_at / 1000 - now)
+        if 0 < remaining <= WATCH_NEAR_EXPIRY_FAST_POLL_SECONDS:
+            return min(max(interval, 1), WATCH_NEAR_EXPIRY_SLEEP_SECONDS)
+    return max(interval, 1)
 
 
 def _build_usage_diagnostics_panel(

@@ -14,7 +14,7 @@ from claude_select.exceptions import (
     ConfigError,
 )
 from claude_select.manager import AuthManager, build_sdk_env, build_sdk_env_auto
-from claude_select.models import AUTH_KIND_CLI_SNAPSHOT, AuthSnapshot
+from claude_select.models import AUTH_KIND_CLI_SNAPSHOT, AuthSnapshot, utc_now
 
 
 def test_capture_and_list_accounts(registry, fake_auth_backend, fake_usage_provider):
@@ -83,6 +83,21 @@ def test_refresh_account_emits_progress_events(registry, fake_auth_backend, fake
         usage_provider=fake_usage_provider,
     )
     manager.capture_current_account("work")
+    details = manager.get_account("work")
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
     events: list[str] = []
 
     payload = manager.refresh_account(
@@ -132,6 +147,21 @@ def test_refresh_account_restores_previous_live_snapshot(
         },
     )
     manager.capture_current_account("test2")
+    details = manager.get_account("test2")
+    manager.registry.upsert_account(
+        alias="test2",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
     manager.select_account("test1")
 
     payload = manager.refresh_account("test2")
@@ -171,6 +201,35 @@ def test_refresh_candidates_filters_cli_accounts(registry, fake_auth_backend, fa
     )
 
     assert manager.refresh_candidates() == ["work"]
+
+
+def test_auto_refresh_candidates_only_include_narrow_expiry_window(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    details = manager.get_account("work")
+    now_ms = int(utc_now().timestamp() * 1000)
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=now_ms + 4_000,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
+
+    assert manager.auto_refresh_candidates() == ["work"]
 
 
 def test_build_sdk_env(registry, fake_auth_backend, fake_usage_provider):
@@ -1217,6 +1276,21 @@ def test_refresh_account_raises_when_print_probe_fails(
         usage_provider=fake_usage_provider,
     )
     manager.capture_current_account("work")
+    details = manager.get_account("work")
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
 
     def failing_probe(prompt: str) -> tuple[bool, str]:
         return False, "nope"
@@ -1224,4 +1298,18 @@ def test_refresh_account_raises_when_print_probe_fails(
     fake_auth_backend.run_print_prompt = failing_probe
 
     with pytest.raises(ConfigError):
+        manager.refresh_account("work")
+
+
+def test_refresh_account_rejects_expiring_account_outside_probe_window(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+
+    with pytest.raises(AccountSelectionError):
         manager.refresh_account("work")
