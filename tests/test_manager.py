@@ -1338,6 +1338,122 @@ def test_list_available_accounts_and_pick_available_account(registry, fake_auth_
     assert {row["alias"] for row in relaxed} == {"backup", "empty", "sdk-only", "work"}
 
 
+def test_pick_available_account_probe_availability_tries_next_candidate(
+    registry, fake_auth_backend
+):
+    usage_provider = AliasUsageProvider(
+        {
+            "alias:work": {"five_hour": 30.0, "seven_day": 40.0},
+            "alias:backup": {"five_hour": 10.0, "seven_day": 20.0},
+        }
+    )
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=usage_provider,
+    )
+    manager.capture_current_account("work")
+    fake_auth_backend.snapshot.oauth_account["emailAddress"] = "backup@example.com"
+    fake_auth_backend.snapshot.oauth_account["organizationUuid"] = "org-456"
+    fake_auth_backend.snapshot.oauth_account["organizationName"] = "Backup Org"
+    fake_auth_backend.snapshot.oauth_account["accountUuid"] = "acct-456"
+    manager.capture_current_account("backup")
+
+    calls: list[str] = []
+
+    def fake_probe(alias: str, *, auto_refresh: bool = False, base_env=None):
+        calls.append(alias)
+        return (alias == "work"), ("pong" if alias == "work" else "403 forbidden")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(manager, "_probe_sdk_alias_availability", fake_probe)
+    try:
+        picked = manager.pick_available_account(
+            include_usage=True,
+            probe_availability=True,
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert picked["alias"] == "work"
+    assert calls == ["backup", "work"]
+
+
+def test_pick_available_account_probe_availability_raises_when_all_fail(
+    registry, fake_auth_backend
+):
+    usage_provider = AliasUsageProvider(
+        {
+            "alias:work": {"five_hour": 10.0, "seven_day": 20.0},
+            "alias:backup": {"five_hour": 30.0, "seven_day": 40.0},
+        }
+    )
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=usage_provider,
+    )
+    manager.capture_current_account("work")
+    fake_auth_backend.snapshot.oauth_account["emailAddress"] = "backup@example.com"
+    fake_auth_backend.snapshot.oauth_account["organizationUuid"] = "org-456"
+    fake_auth_backend.snapshot.oauth_account["organizationName"] = "Backup Org"
+    fake_auth_backend.snapshot.oauth_account["accountUuid"] = "acct-456"
+    manager.capture_current_account("backup")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        manager,
+        "_probe_sdk_alias_availability",
+        lambda alias, *, auto_refresh=False, base_env=None: (False, f"{alias} denied"),
+    )
+    try:
+        with pytest.raises(AccountSelectionError, match="passed runtime probe"):
+            manager.pick_available_account(
+                include_usage=True,
+                probe_availability=True,
+            )
+    finally:
+        monkeypatch.undo()
+
+
+def test_list_available_accounts_probe_availability_filters_failed_aliases(
+    registry, fake_auth_backend
+):
+    usage_provider = AliasUsageProvider(
+        {
+            "alias:work": {"five_hour": 10.0, "seven_day": 20.0},
+            "alias:backup": {"five_hour": 30.0, "seven_day": 40.0},
+        }
+    )
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=usage_provider,
+    )
+    manager.capture_current_account("work")
+    fake_auth_backend.snapshot.oauth_account["emailAddress"] = "backup@example.com"
+    fake_auth_backend.snapshot.oauth_account["organizationUuid"] = "org-456"
+    fake_auth_backend.snapshot.oauth_account["organizationName"] = "Backup Org"
+    fake_auth_backend.snapshot.oauth_account["accountUuid"] = "acct-456"
+    manager.capture_current_account("backup")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        manager,
+        "_probe_sdk_alias_availability",
+        lambda alias, *, auto_refresh=False, base_env=None: (alias == "work", "blocked"),
+    )
+    try:
+        rows = manager.list_available_accounts(
+            include_usage=True,
+            probe_availability=True,
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert [row["alias"] for row in rows] == ["work"]
+
+
 def test_pick_available_account_raises_when_no_match(registry, fake_auth_backend):
     usage_provider = AliasUsageProvider(
         {
@@ -1536,6 +1652,25 @@ def test_build_sdk_env_auto_refresh_refreshes_expired_cli_alias(
     assert selected["status"] == "healthy"
 
 
+def test_build_sdk_env_probe_availability_raises_on_failed_probe(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    monkeypatch.setattr(
+        manager,
+        "_probe_sdk_env_availability",
+        lambda env, *, prompt="ping": (False, "403 forbidden"),
+    )
+
+    with pytest.raises(AccountSelectionError, match="failed runtime probe: 403 forbidden"):
+        manager.build_sdk_env("work", probe_availability=True)
+
+
 def test_top_level_build_sdk_env_supports_auto_refresh(
     registry, fake_auth_backend, fake_usage_provider, monkeypatch
 ):
@@ -1548,6 +1683,27 @@ def test_top_level_build_sdk_env_supports_auto_refresh(
     monkeypatch.setattr("claude_select.manager.AuthManager", lambda: manager)
 
     env = build_sdk_env("work", auto_refresh=True)
+
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "access-1"
+
+
+def test_top_level_build_sdk_env_supports_probe_availability(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    monkeypatch.setattr("claude_select.manager.AuthManager", lambda: manager)
+    monkeypatch.setattr(
+        manager,
+        "_probe_sdk_env_availability",
+        lambda env, *, prompt="ping": (True, "pong"),
+    )
+
+    env = build_sdk_env("work", probe_availability=True)
 
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "access-1"
 

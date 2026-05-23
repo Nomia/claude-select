@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -570,28 +572,23 @@ class AuthManager:
         base_env: dict[str, str] | None = None,
         *,
         auto_refresh: bool = False,
+        probe_availability: bool = False,
     ) -> dict[str, str]:
         """Return an env mapping for Claude Agent SDK usage.
 
-        Captured auth is treated as a fixed snapshot. This tool does not try to
-        refresh tokens automatically, so only the access token and scopes are
-        exported for SDK consumption.
+        Captured auth is treated as a fixed snapshot. With ``auto_refresh=True``,
+        expired CLI snapshots are refreshed on demand before the SDK env is
+        built. With ``probe_availability=True``, one minimal Claude request is
+        attempted to verify that the prepared env is actually usable.
         """
         details = self.get_account(alias, auto_refresh=auto_refresh)
-        sdk_snapshot = self._sdk_snapshot_for_details(details)
-        if sdk_snapshot is None and details.record.status() == STATUS_EXPIRED:
-            raise AuthExpiredError(
-                f"Account '{details.record.alias}' is expired. Run relogin before using it."
-            )
-        env = dict(base_env if base_env is not None else os.environ)
-        for key in CONFLICTING_AUTH_ENV_VARS:
-            env.pop(key, None)
-        effective_snapshot = sdk_snapshot or details.snapshot
-        oauth = effective_snapshot.credentials["claudeAiOauth"]
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = str(oauth["accessToken"])
-        scopes = effective_snapshot.scopes()
-        if scopes:
-            env["CLAUDE_CODE_OAUTH_SCOPES"] = " ".join(scopes)
+        env = self._sdk_env_for_details(details, base_env=base_env)
+        if probe_availability:
+            ok, reason = self._probe_sdk_env_availability(env)
+            if not ok:
+                raise AccountSelectionError(
+                    f"Account '{details.record.alias}' failed runtime probe: {reason}"
+                )
         return env
 
     def pick_sdk_account(
@@ -639,6 +636,29 @@ class AuthManager:
             "oauth_account": effective_snapshot.oauth_account,
             "credentials": effective_snapshot.credentials,
         }
+
+    def _sdk_env_for_details(
+        self,
+        details: AccountDetails,
+        *,
+        base_env: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Build SDK env from one resolved account details object."""
+        sdk_snapshot = self._sdk_snapshot_for_details(details)
+        if sdk_snapshot is None and details.record.status() == STATUS_EXPIRED:
+            raise AuthExpiredError(
+                f"Account '{details.record.alias}' is expired. Run relogin before using it."
+            )
+        env = dict(base_env if base_env is not None else os.environ)
+        for key in CONFLICTING_AUTH_ENV_VARS:
+            env.pop(key, None)
+        effective_snapshot = sdk_snapshot or details.snapshot
+        oauth = effective_snapshot.credentials["claudeAiOauth"]
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = str(oauth["accessToken"])
+        scopes = effective_snapshot.scopes()
+        if scopes:
+            env["CLAUDE_CODE_OAUTH_SCOPES"] = " ".join(scopes)
+        return env
 
     def current_alias(self) -> str | None:
         """Return the last selected CLI alias if any."""
@@ -756,6 +776,7 @@ class AuthManager:
         include_usage: bool = True,
         auto_refresh: bool = False,
         require_quota: bool = True,
+        probe_availability: bool = False,
     ) -> list[dict[str, Any]]:
         """Return accounts that are currently usable, optionally requiring quota visibility."""
         rows = self.list_accounts(
@@ -772,6 +793,11 @@ class AuthManager:
                 if not self._row_has_remaining_quota(row):
                     continue
             available.append(row)
+        if probe_availability:
+            return self._filter_probeable_available_rows(
+                available,
+                auto_refresh=auto_refresh,
+            )
         return available
 
     def pick_available_account(
@@ -781,23 +807,37 @@ class AuthManager:
         auto_refresh: bool = False,
         require_quota: bool = True,
         prefer_current: bool = True,
+        probe_availability: bool = False,
     ) -> dict[str, Any]:
         """Pick one currently available account using a simple deterministic strategy."""
         available = self.list_available_accounts(
             include_usage=include_usage,
             auto_refresh=auto_refresh,
             require_quota=require_quota,
+            probe_availability=False,
         )
         if not available:
             raise AccountSelectionError("No available accounts matched the requested criteria.")
-        current_alias = self.current_alias() if prefer_current else None
-        if current_alias:
-            for row in available:
-                if row["alias"] == current_alias:
-                    return row
-        if require_quota:
-            return max(available, key=self._available_account_sort_key)
-        return sorted(available, key=lambda row: str(row["alias"]))[0]
+        ordered = self._ordered_available_rows(
+            available,
+            require_quota=require_quota,
+            prefer_current=prefer_current,
+        )
+        if not probe_availability:
+            return ordered[0]
+        failures: list[str] = []
+        for row in ordered:
+            ok, reason = self._probe_sdk_alias_availability(
+                str(row["alias"]),
+                auto_refresh=auto_refresh,
+            )
+            if ok:
+                return row
+            failures.append(f"{row['alias']}: {reason}")
+        raise AccountSelectionError(
+            "No available accounts passed runtime probe. Tried: "
+            + "; ".join(failures)
+        )
 
     def render_table(self, include_usage: bool = False) -> str:
         """Render the current account list as a plain-text table."""
@@ -1265,6 +1305,55 @@ class AuthManager:
         self.refresh_account(alias)
         return self.registry.get_account(alias)
 
+    def _probe_sdk_alias_availability(
+        self,
+        alias: str,
+        *,
+        auto_refresh: bool = False,
+        base_env: dict[str, str] | None = None,
+    ) -> tuple[bool, str]:
+        """Probe whether one alias can satisfy a minimal Claude SDK-style request."""
+        details = self.get_account(alias, auto_refresh=auto_refresh)
+        env = self._sdk_env_for_details(details, base_env=base_env)
+        return self._probe_sdk_env_availability(env)
+
+    def _probe_sdk_env_availability(
+        self,
+        env: dict[str, str],
+        *,
+        prompt: str = "ping",
+    ) -> tuple[bool, str]:
+        """Probe one prepared SDK env via a minimal Claude CLI request."""
+        claude_path = shutil.which("claude")
+        if not claude_path:
+            return False, "`claude` was not found in PATH."
+        result = subprocess.run(
+            [claude_path, "-p", prompt],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        output = (result.stdout or "").strip() or (result.stderr or "").strip()
+        return result.returncode == 0, output or f"Claude exited with code {result.returncode}"
+
+    def _filter_probeable_available_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        auto_refresh: bool,
+    ) -> list[dict[str, Any]]:
+        """Return only rows that pass a runtime availability probe."""
+        available: list[dict[str, Any]] = []
+        for row in rows:
+            ok, _reason = self._probe_sdk_alias_availability(
+                str(row["alias"]),
+                auto_refresh=auto_refresh,
+            )
+            if ok:
+                available.append(row)
+        return available
+
     def _best_effort_auto_refresh_candidates(self) -> None:
         """Best-effort refresh for list-style APIs that opt into auto-refresh."""
         for alias in self.refresh_candidates():
@@ -1319,6 +1408,35 @@ class AuthManager:
         five_hour_remaining = remaining_percentage(usage.get("five_hour")) or 0.0
         seven_day_remaining = remaining_percentage(usage.get("seven_day")) or 0.0
         return (five_hour_remaining, seven_day_remaining, str(row["alias"]))
+
+    def _ordered_available_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        require_quota: bool,
+        prefer_current: bool,
+    ) -> list[dict[str, Any]]:
+        """Order candidate rows using the same preference rules as account picking."""
+        ordered = list(rows)
+        if require_quota:
+            ordered = sorted(
+                ordered,
+                key=self._available_account_sort_key,
+                reverse=True,
+            )
+        else:
+            ordered = sorted(ordered, key=lambda row: str(row["alias"]))
+        if not prefer_current:
+            return ordered
+        current_alias = self.current_alias()
+        if not current_alias:
+            return ordered
+        for index, row in enumerate(ordered):
+            if row["alias"] == current_alias:
+                if index == 0:
+                    return ordered
+                return [row] + ordered[:index] + ordered[index + 1 :]
+        return ordered
 
     def _sdk_candidate_available(self, row: dict[str, Any]) -> bool:
         usage = row.get("usage")
@@ -1572,9 +1690,15 @@ def build_sdk_env(
     base_env: dict[str, str] | None = None,
     *,
     auto_refresh: bool = False,
+    probe_availability: bool = False,
 ) -> dict[str, str]:
     """Convenience wrapper around AuthManager.build_sdk_env."""
-    return AuthManager().build_sdk_env(alias, base_env=base_env, auto_refresh=auto_refresh)
+    return AuthManager().build_sdk_env(
+        alias,
+        base_env=base_env,
+        auto_refresh=auto_refresh,
+        probe_availability=probe_availability,
+    )
 
 
 def build_sdk_env_auto(
