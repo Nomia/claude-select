@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import urllib.error
 
 import pytest
@@ -76,6 +77,308 @@ def test_refresh_account_uses_print_probe(registry, fake_auth_backend, fake_usag
     assert fake_auth_backend.print_prompts == ["ping"]
 
 
+def test_refresh_account_prefers_direct_oauth_refresh(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["clientId"] = "client-123"
+    manager.capture_current_account("work")
+    details = manager.get_account("work")
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "access_token": "access-2",
+                    "refresh_token": "refresh-2",
+                    "expires_in": 28800,
+                    "scope": "user:profile user:mcp_servers",
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+
+    payload = manager.refresh_account("work")
+
+    assert payload["refresh_method"] == "oauth_token"
+    assert payload["probe_output"] == "refreshed via OAuth token endpoint"
+    assert fake_auth_backend.print_prompts == []
+    refreshed = manager.get_account("work").snapshot.credentials["claudeAiOauth"]
+    assert refreshed["accessToken"] == "access-2"
+    assert refreshed["refreshToken"] == "refresh-2"
+    assert refreshed["clientId"] == "client-123"
+    assert refreshed["scopes"] == ["user:profile", "user:mcp_servers"]
+
+
+def test_refresh_snapshot_via_oauth_accepts_string_expires_in(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    snapshot = AuthSnapshot(
+        oauth_account={"emailAddress": "work@example.com"},
+        credentials={
+            "claudeAiOauth": {
+                "accessToken": "access-1",
+                "refreshToken": "refresh-1",
+                "expiresAt": 0,
+                "clientId": "client-123",
+            }
+        },
+    )
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "access_token": "access-2",
+                    "expires_in": "28800",
+                    "scope": "user:profile",
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+
+    refreshed = manager._refresh_snapshot_via_oauth(snapshot)
+
+    payload = refreshed.credentials["claudeAiOauth"]
+    assert payload["accessToken"] == "access-2"
+    assert payload["refreshToken"] == "refresh-1"
+    assert payload["clientId"] == "client-123"
+    assert payload["scopes"] == ["user:profile"]
+
+
+def test_refresh_snapshot_via_oauth_raises_helpful_error_for_http_failure(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    snapshot = AuthSnapshot(
+        oauth_account={"emailAddress": "work@example.com"},
+        credentials={
+            "claudeAiOauth": {
+                "accessToken": "access-1",
+                "refreshToken": "refresh-1",
+                "expiresAt": 0,
+                "clientId": "client-123",
+            }
+        },
+    )
+
+    def fake_urlopen(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            manager.OAUTH_TOKEN_REFRESH_URL,
+            400,
+            "Bad Request",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":{"message":"refresh failed"}}'),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(ConfigError, match="refresh failed"):
+        manager._refresh_snapshot_via_oauth(snapshot)
+
+
+def test_refresh_snapshot_via_oauth_rejects_missing_access_token(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    snapshot = AuthSnapshot(
+        oauth_account={"emailAddress": "work@example.com"},
+        credentials={
+            "claudeAiOauth": {
+                "accessToken": "access-1",
+                "refreshToken": "refresh-1",
+                "expiresAt": 0,
+                "clientId": "client-123",
+            }
+        },
+    )
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"expires_in": 28800}).encode("utf-8")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(ConfigError, match="did not return an access_token"):
+        manager._refresh_snapshot_via_oauth(snapshot)
+
+
+def test_refresh_snapshot_via_oauth_rejects_invalid_expires_in(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    snapshot = AuthSnapshot(
+        oauth_account={"emailAddress": "work@example.com"},
+        credentials={
+            "claudeAiOauth": {
+                "accessToken": "access-1",
+                "refreshToken": "refresh-1",
+                "expiresAt": 0,
+                "clientId": "client-123",
+            }
+        },
+    )
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "access_token": "access-2",
+                    "expires_in": "not-a-number",
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(ConfigError, match="invalid expires_in"):
+        manager._refresh_snapshot_via_oauth(snapshot)
+
+
+def test_refresh_account_falls_back_when_client_id_missing(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    details = manager.get_account("work")
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
+
+    payload = manager.refresh_account("work")
+
+    assert payload["refresh_method"] == "probe"
+    assert payload["probe_output"] == "pong"
+    assert fake_auth_backend.print_prompts == ["ping"]
+
+
+def test_direct_refresh_unavailable_when_refresh_token_missing(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    snapshot = AuthSnapshot(
+        oauth_account={"emailAddress": "work@example.com"},
+        credentials={"claudeAiOauth": {"accessToken": "access-1", "clientId": "client-123"}},
+    )
+
+    assert manager._direct_refresh_unavailable_reason(snapshot) == "missing refresh token"
+
+
+def test_capture_current_account_persists_login_client_id(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    fake_auth_backend._pending_auth_login_client_id = "captured-client-id"
+
+    manager.capture_current_account("work")
+
+    assert manager.get_account("work").snapshot.client_id() == "captured-client-id"
+
+
+def test_sync_current_account_preserves_existing_client_id(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    fake_auth_backend._pending_auth_login_client_id = "captured-client-id"
+    manager.capture_current_account("work")
+
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"].pop("clientId", None)
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["accessToken"] = "new-access"
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["expiresAt"] = int(
+        (time.time() + 3600) * 1000
+    )
+
+    payload = manager.sync_current_account()
+
+    assert payload["status"] == "synced"
+    assert manager.get_account("work").snapshot.client_id() == "captured-client-id"
+
+
 def test_refresh_account_emits_progress_events(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
@@ -110,6 +413,7 @@ def test_refresh_account_emits_progress_events(registry, fake_auth_backend, fake
         "start",
         "activating_target",
         "target_activated",
+        "falling_back_to_probe",
         "running_probe",
         "probe_succeeded",
         "syncing_current",
@@ -203,7 +507,7 @@ def test_refresh_candidates_filters_cli_accounts(registry, fake_auth_backend, fa
     assert manager.refresh_candidates() == ["work"]
 
 
-def test_auto_refresh_candidates_only_include_narrow_expiry_window(
+def test_auto_refresh_candidates_include_narrow_expiry_window_and_expired(
     registry, fake_auth_backend, fake_usage_provider
 ):
     manager = AuthManager(
@@ -223,6 +527,23 @@ def test_auto_refresh_candidates_only_include_narrow_expiry_window(
         account_uuid=details.record.account_uuid,
         captured_at=details.record.captured_at,
         expires_at=now_ms + 4_000,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
+
+    assert manager.auto_refresh_candidates() == ["work"]
+
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
         last_selected_at=details.record.last_selected_at,
         source=details.record.source,
         snapshot=details.snapshot,

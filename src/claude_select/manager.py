@@ -63,6 +63,7 @@ class AuthManager:
 
     REFRESH_PRE_EXPIRY_WINDOW_SECONDS = 5
     REFRESH_POST_EXPIRY_WINDOW_SECONDS = 10
+    OAUTH_TOKEN_REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
 
     def __init__(
         self,
@@ -429,7 +430,7 @@ class AuthManager:
         prompt: str = "ping",
         progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        """Try to refresh one CLI account by triggering a lightweight Claude request."""
+        """Try to refresh one CLI account via direct OAuth refresh or a Claude probe."""
         def emit(stage: str, **payload: Any) -> None:
             if progress_callback is not None:
                 progress_callback(stage, payload)
@@ -458,18 +459,45 @@ class AuthManager:
         account = self._activate_cli_account(normalized, allow_expired=True, mark_selected=False)
         emit("target_activated", alias=account["alias"], status=account["status"])
         try:
-            emit("running_probe", alias=account["alias"], prompt=prompt)
-            ok, output = self.auth_backend.run_print_prompt(prompt)
-            if not ok:
-                emit("probe_failed", alias=account["alias"], prompt=prompt, output=output)
-                raise ConfigError(f"Claude refresh probe failed: {output}")
-            emit("probe_succeeded", alias=account["alias"], prompt=prompt, output=output)
+            output = ""
+            refresh_method = "probe"
+            direct_refresh_reason = self._direct_refresh_unavailable_reason(details.snapshot)
+            if direct_refresh_reason is None:
+                emit("running_direct_refresh", alias=account["alias"])
+                try:
+                    refreshed_snapshot = self._refresh_snapshot_via_oauth(details.snapshot)
+                except ClaudeSelectError as exc:
+                    direct_refresh_reason = str(exc)
+                    emit(
+                        "direct_refresh_failed",
+                        alias=account["alias"],
+                        reason=direct_refresh_reason,
+                    )
+                else:
+                    self.auth_backend.write_snapshot(refreshed_snapshot)
+                    refresh_method = "oauth_token"
+                    output = "refreshed via OAuth token endpoint"
+                    emit("direct_refresh_succeeded", alias=account["alias"])
+            if refresh_method != "oauth_token":
+                if direct_refresh_reason is not None:
+                    emit(
+                        "falling_back_to_probe",
+                        alias=account["alias"],
+                        reason=direct_refresh_reason,
+                    )
+                emit("running_probe", alias=account["alias"], prompt=prompt)
+                ok, output = self.auth_backend.run_print_prompt(prompt)
+                if not ok:
+                    emit("probe_failed", alias=account["alias"], prompt=prompt, output=output)
+                    raise ConfigError(f"Claude refresh probe failed: {output}")
+                emit("probe_succeeded", alias=account["alias"], prompt=prompt, output=output)
             emit("syncing_current", alias=account["alias"])
             sync_payload = self.sync_current_account()
             emit("sync_succeeded", alias=account["alias"], message=sync_payload["message"])
             refreshed = self.registry.get_account(account["alias"]).record
             return {
                 "alias": account["alias"],
+                "refresh_method": refresh_method,
                 "probe_prompt": prompt,
                 "probe_output": output,
                 "sync": sync_payload,
@@ -503,14 +531,17 @@ class AuthManager:
         ]
 
     def auto_refresh_candidates(self) -> list[str]:
-        """Return CLI aliases inside the narrow Claude-side refresh window."""
+        """Return CLI aliases that should be auto-refreshed in watch mode."""
         now = utc_now()
         rows = self.list_accounts(include_usage=False)
         return [
             str(row["alias"])
             for row in rows
             if row["auth_kind"] == AUTH_KIND_CLI_SNAPSHOT
-            and self._is_expires_at_within_refresh_probe_window(row.get("expires_at"), now=now)
+            and (
+                row["status"] == STATUS_EXPIRED
+                or self._is_expires_at_within_refresh_probe_window(row.get("expires_at"), now=now)
+            )
         ]
 
     def _activate_cli_account(
@@ -861,6 +892,7 @@ class AuthManager:
         auth_kind: str = AUTH_KIND_CLI_SNAPSHOT,
         expires_at_override: int | None = None,
     ) -> AccountRecord:
+        snapshot = self._snapshot_with_persisted_client_id(alias, snapshot)
         oauth_account = snapshot.oauth_account
         email = oauth_account.get("emailAddress")
         if not email:
@@ -892,6 +924,7 @@ class AuthManager:
         return self.registry.get_account(alias).record
 
     def _sync_snapshot(self, alias: str, snapshot: AuthSnapshot) -> AccountRecord:
+        snapshot = self._snapshot_with_persisted_client_id(alias, snapshot)
         oauth_account = snapshot.oauth_account
         email = oauth_account.get("emailAddress")
         if not email:
@@ -1093,6 +1126,116 @@ class AuthManager:
         return (
             before.oauth_account != after.oauth_account
             or before.credentials != after.credentials
+        )
+
+    def _snapshot_with_persisted_client_id(
+        self,
+        alias: str,
+        snapshot: AuthSnapshot,
+    ) -> AuthSnapshot:
+        """Attach a persisted client_id when the captured snapshot itself does not include one."""
+        client_id = snapshot.client_id()
+        if client_id:
+            return snapshot
+        pending_client_id = self.auth_backend.consume_auth_login_client_id()
+        if pending_client_id:
+            return self._snapshot_with_client_id(snapshot, pending_client_id)
+        try:
+            existing = self.registry.get_account(alias).snapshot.client_id()
+        except AccountNotFoundError:
+            existing = None
+        if existing:
+            return self._snapshot_with_client_id(snapshot, existing)
+        return snapshot
+
+    @staticmethod
+    def _snapshot_with_client_id(snapshot: AuthSnapshot, client_id: str) -> AuthSnapshot:
+        """Return a snapshot whose Claude OAuth payload also carries client_id."""
+        normalized = client_id.strip()
+        if not normalized:
+            return snapshot
+        credentials = json.loads(json.dumps(snapshot.credentials))
+        oauth = credentials.setdefault("claudeAiOauth", {})
+        if isinstance(oauth, dict):
+            oauth["clientId"] = normalized
+        return AuthSnapshot(
+            oauth_account=json.loads(json.dumps(snapshot.oauth_account)),
+            credentials=credentials,
+        )
+
+    @staticmethod
+    def _direct_refresh_unavailable_reason(snapshot: AuthSnapshot) -> str | None:
+        """Return why direct OAuth refresh cannot be attempted, or None when it can."""
+        oauth = snapshot.credentials.get("claudeAiOauth", {})
+        if not isinstance(oauth, dict):
+            return "missing Claude OAuth payload"
+        refresh_token = oauth.get("refreshToken", "")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            return "missing refresh token"
+        if snapshot.client_id() is None:
+            return "client_id was not captured for this snapshot"
+        return None
+
+    def _refresh_snapshot_via_oauth(self, snapshot: AuthSnapshot) -> AuthSnapshot:
+        """Refresh one stored OAuth snapshot directly via Claude's token endpoint."""
+        oauth = snapshot.credentials.get("claudeAiOauth", {})
+        if not isinstance(oauth, dict):
+            raise ConfigError("Claude OAuth credentials are missing.")
+        refresh_token = str(oauth.get("refreshToken", "") or "").strip()
+        client_id = snapshot.client_id()
+        if not refresh_token or not client_id:
+            raise ConfigError("Direct OAuth refresh requires both refresh_token and client_id.")
+        request = urllib.request.Request(
+            self.OAUTH_TOKEN_REFRESH_URL,
+            data=json.dumps(
+                {
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": client_id,
+                }
+            ).encode("utf-8"),
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+                "User-Agent": "axios/1.13.6",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise ConfigError(self._extract_http_error_reason(exc)) from exc
+        except (urllib.error.URLError, json.JSONDecodeError) as exc:
+            raise ConfigError(f"OAuth token refresh failed: {exc}") from exc
+
+        access_token = str(payload.get("access_token", "") or "").strip()
+        if not access_token:
+            raise ConfigError("OAuth token refresh did not return an access_token.")
+        expires_in_raw = payload.get("expires_in")
+        if not isinstance(expires_in_raw, int):
+            try:
+                expires_in = int(expires_in_raw)
+            except (TypeError, ValueError) as exc:
+                raise ConfigError("OAuth token refresh returned an invalid expires_in.") from exc
+        else:
+            expires_in = expires_in_raw
+        refreshed_credentials = json.loads(json.dumps(snapshot.credentials))
+        refreshed_oauth = refreshed_credentials.setdefault("claudeAiOauth", {})
+        if not isinstance(refreshed_oauth, dict):
+            raise ConfigError("Claude OAuth credentials are missing.")
+        refreshed_oauth["accessToken"] = access_token
+        refreshed_oauth["clientId"] = client_id
+        refreshed_oauth["expiresAt"] = int((utc_now().timestamp() + expires_in) * 1000)
+        refreshed_token = str(payload.get("refresh_token", "") or "").strip()
+        if refreshed_token:
+            refreshed_oauth["refreshToken"] = refreshed_token
+        scopes = payload.get("scope")
+        if isinstance(scopes, str) and scopes.strip():
+            refreshed_oauth["scopes"] = scopes.split()
+        return AuthSnapshot(
+            oauth_account=json.loads(json.dumps(snapshot.oauth_account)),
+            credentials=refreshed_credentials,
         )
 
     def _usage_for_alias(

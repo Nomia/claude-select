@@ -6,11 +6,14 @@ import getpass
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import parse_qs, urlparse
 
 from claude_select.exceptions import ConfigError
 from claude_select.models import AuthSnapshot
@@ -137,6 +140,7 @@ class ClaudeAuthBackend:
         self.config_path = config_path or get_global_config_path(env)
         self.credential_store = credential_store or create_default_credential_store(env)
         self.backup_dir = backup_dir or (self.config_path.parent / ".claude-select-backups")
+        self._pending_auth_login_client_id: str | None = None
 
     def read_snapshot(self) -> AuthSnapshot:
         """Read the current Claude live auth snapshot."""
@@ -173,7 +177,11 @@ class ClaudeAuthBackend:
             handle.write("\n")
             temp_name = handle.name
         os.replace(temp_name, self.config_path)
-        self.credential_store.write(snapshot.credentials)
+        credentials = json.loads(json.dumps(snapshot.credentials))
+        oauth = credentials.get("claudeAiOauth")
+        if isinstance(oauth, dict):
+            oauth.pop("clientId", None)
+        self.credential_store.write(credentials)
 
     def describe_targets(self) -> list[str]:
         """Describe which Claude live-state targets will be updated."""
@@ -196,8 +204,28 @@ class ClaudeAuthBackend:
         claude_path = shutil.which("claude")
         if not claude_path:
             return False
-        subprocess.run([claude_path, "auth", "login"], check=False)
+        self._pending_auth_login_client_id = None
+        process = subprocess.Popen(
+            [claude_path, "auth", "login"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        captured_lines: list[str] = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="")
+            captured_lines.append(line)
+        process.wait()
+        self._pending_auth_login_client_id = self._extract_client_id_from_lines(captured_lines)
         return True
+
+    def consume_auth_login_client_id(self) -> str | None:
+        """Return and clear the client_id captured from the latest auth login."""
+        client_id = self._pending_auth_login_client_id
+        self._pending_auth_login_client_id = None
+        return client_id
 
     def run_print_prompt(self, prompt: str) -> tuple[bool, str]:
         """Run `claude -p <prompt>` and return whether it succeeded."""
@@ -243,3 +271,18 @@ class ClaudeAuthBackend:
         if self.config_path.exists():
             shutil.copy2(self.config_path, self.backup_dir / self.config_path.name)
         self.credential_store.backup(self.backup_dir)
+
+    @staticmethod
+    def _extract_client_id_from_lines(lines: Iterable[str]) -> str | None:
+        """Extract OAuth client_id from one streamed `claude auth login` output."""
+        for line in lines:
+            match = re.search(r"https://claude\.ai/oauth/authorize\S+", line)
+            if not match:
+                continue
+            parsed = urlparse(match.group(0))
+            client_ids = parse_qs(parsed.query).get("client_id")
+            if client_ids:
+                client_id = client_ids[0].strip()
+                if client_id:
+                    return client_id
+        return None

@@ -36,6 +36,7 @@ class FakeAuthBackend(ClaudeAuthBackend):
         self.written_snapshot: AuthSnapshot | None = None
         self.login_attempts = 0
         self.print_prompts: list[str] = []
+        self._pending_auth_login_client_id: str | None = None
         self.auth_status_payload = {
             "loggedIn": True,
             "authMethod": "claude.ai",
@@ -67,6 +68,7 @@ class FakeAuthBackend(ClaudeAuthBackend):
 
     def run_auth_login(self) -> bool:
         self.login_attempts += 1
+        self._pending_auth_login_client_id = None
         return True
 
     def run_print_prompt(self, prompt: str) -> tuple[bool, str]:

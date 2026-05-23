@@ -80,6 +80,35 @@ def test_auth_backend_write_snapshot(tmp_path):
     assert str(credentials_path) in targets[1]
 
 
+def test_auth_backend_write_snapshot_strips_client_id_from_live_credentials(tmp_path):
+    config_path = tmp_path / ".claude.json"
+    credentials_path = tmp_path / ".claude" / ".credentials.json"
+    config_path.write_text(json.dumps({"theme": "dark"}), encoding="utf-8")
+    store = FileCredentialStore(credentials_path)
+    store.write({"claudeAiOauth": {"accessToken": "old"}})
+    backend = ClaudeAuthBackend(
+        config_path=config_path,
+        credential_store=store,
+        backup_dir=tmp_path / "backups",
+    )
+    snapshot = AuthSnapshot(
+        oauth_account={"emailAddress": "next@example.com"},
+        credentials={
+            "claudeAiOauth": {
+                "accessToken": "next",
+                "refreshToken": "refresh",
+                "clientId": "client-123",
+            }
+        },
+    )
+
+    backend.write_snapshot(snapshot)
+
+    written_credentials = store.read()["claudeAiOauth"]
+    assert written_credentials["accessToken"] == "next"
+    assert "clientId" not in written_credentials
+
+
 def test_auth_backend_rejects_invalid_config(tmp_path):
     config_path = tmp_path / ".claude.json"
     credentials_path = tmp_path / ".claude" / ".credentials.json"
@@ -159,20 +188,37 @@ def test_auth_backend_describe_targets_keychain():
 
 def test_auth_backend_run_auth_login(monkeypatch):
     calls: list[list[str]] = []
+    seen_client_ids: list[str | None] = []
 
-    class Result:
-        returncode = 0
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = iter(
+                [
+                    "Opening browser to sign in…\n",
+                    (
+                        "If the browser didn't open, visit: "
+                        "https://claude.ai/oauth/authorize?code=true&client_id="
+                        "test-client-id&response_type=code\n"
+                    ),
+                    "Login successful.\n",
+                ]
+            )
+
+        def wait(self):
+            return 0
 
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
     monkeypatch.setattr(
-        "subprocess.run",
-        lambda command, **_kwargs: calls.append(command) or Result(),
+        "subprocess.Popen",
+        lambda command, **_kwargs: calls.append(command) or FakeProcess(),
     )
 
     backend = ClaudeAuthBackend()
 
     assert backend.run_auth_login() is True
     assert calls == [["/usr/local/bin/claude", "auth", "login"]]
+    seen_client_ids.append(backend.consume_auth_login_client_id())
+    assert seen_client_ids == ["test-client-id"]
 
 
 def test_auth_backend_read_auth_status(monkeypatch):

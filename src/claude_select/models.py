@@ -83,6 +83,14 @@ class AuthSnapshot:
             return []
         return [str(scope) for scope in raw]
 
+    def client_id(self) -> str | None:
+        """Return the stored OAuth client_id if available."""
+        oauth = self.credentials.get("claudeAiOauth", {})
+        raw = oauth.get("clientId")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        return None
+
 
 @dataclass(slots=True)
 class AccountRecord:

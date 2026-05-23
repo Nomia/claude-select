@@ -758,6 +758,47 @@ def test_watch_auto_refresh_helper(registry, fake_auth_backend, fake_usage_provi
     assert fake_auth_backend.print_prompts == ["ping"]
 
 
+def test_watch_auto_refresh_expired_accounts_retry_on_longer_cooldown(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    details = manager.get_account("work")
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=0,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
+
+    message = cli._maybe_auto_refresh_accounts(manager, {}, 1000.0)
+    assert message is not None
+    assert "Auto-refreshed work" in message
+
+    fake_auth_backend.print_prompts.clear()
+    attempts = {"work": 1000.0}
+    message = cli._maybe_auto_refresh_accounts(manager, attempts, 1030.0)
+    assert message is None
+    assert fake_auth_backend.print_prompts == []
+
+    message = cli._maybe_auto_refresh_accounts(manager, attempts, 1061.0)
+    assert message is not None
+    assert "Auto-refreshed work" in message
+    assert fake_auth_backend.print_prompts == ["ping"]
+
+
 def test_watch_usage_refresh_rate_limits_with_backoff(
     monkeypatch, registry, fake_auth_backend, fake_usage_provider
 ):

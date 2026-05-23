@@ -25,7 +25,8 @@ from claude_select.exceptions import ClaudeSelectError
 from claude_select.manager import AuthManager
 
 TOKEN_RE = re.compile(r"(sk-ant-oat[0-9A-Za-z._-]+)")
-AUTO_REFRESH_COOLDOWN_SECONDS = 5
+AUTO_REFRESH_NEAR_EXPIRY_COOLDOWN_SECONDS = 5
+AUTO_REFRESH_EXPIRED_RETRY_COOLDOWN_SECONDS = 60
 WATCH_NEAR_EXPIRY_FAST_POLL_SECONDS = 60
 WATCH_NEAR_EXPIRY_SLEEP_SECONDS = 1
 WATCH_USAGE_REFRESH_INTERVAL_SECONDS = 5 * 60
@@ -539,7 +540,7 @@ def _render_account_usage(payload: dict[str, Any]) -> str:
 
 
 def _run_refresh(manager: AuthManager, *, alias: str | None) -> int:
-    """Refresh one or more CLI accounts via `claude -p` and sync-current."""
+    """Refresh one or more CLI accounts via direct OAuth refresh or `claude -p`."""
     targets = [alias] if alias else manager.refresh_candidates()
     if not targets:
         print("No CLI accounts currently need refresh.")
@@ -560,6 +561,16 @@ def _run_refresh(manager: AuthManager, *, alias: str | None) -> int:
                     f"  [2/4] Running `claude -p {payload['prompt']!r}` "
                     "to trigger Claude-side refresh..."
                 )
+            elif stage == "running_direct_refresh":
+                print("  [2/4] Refreshing OAuth token directly via Claude token endpoint...")
+            elif stage == "direct_refresh_succeeded":
+                print("         Direct OAuth refresh succeeded.")
+            elif stage == "direct_refresh_failed":
+                print("         Direct OAuth refresh failed.")
+                if payload.get("reason"):
+                    print(f"         Reason: {payload['reason']}")
+            elif stage == "falling_back_to_probe":
+                print("         Falling back to `claude -p` refresh.")
             elif stage == "probe_succeeded":
                 print("         Claude probe succeeded.")
             elif stage == "probe_failed":
@@ -587,7 +598,10 @@ def _run_refresh(manager: AuthManager, *, alias: str | None) -> int:
                     print("         No restore was needed.")
 
         payload = manager.refresh_account(target, progress_callback=on_progress)
-        print(f"Refreshed {payload['alias']} via `claude -p`.")
+        if payload["refresh_method"] == "oauth_token":
+            print(f"Refreshed {payload['alias']} via direct OAuth token refresh.")
+        else:
+            print(f"Refreshed {payload['alias']} via `claude -p`.")
         if payload["probe_output"]:
             print(f"Probe output: {payload['probe_output']}")
         print()
@@ -910,8 +924,19 @@ def _maybe_auto_refresh_accounts(
     """Best-effort auto-refresh for watch mode with per-alias cooldown."""
     messages: list[str] = []
     for alias in manager.auto_refresh_candidates():
+        try:
+            details = manager.get_account(alias)
+        except ClaudeSelectError as exc:
+            messages.append(f"Auto-refresh failed for {alias}: {exc}")
+            continue
+        is_near_expiry = manager._is_within_refresh_probe_window(details.record)
+        cooldown = (
+            AUTO_REFRESH_NEAR_EXPIRY_COOLDOWN_SECONDS
+            if is_near_expiry
+            else AUTO_REFRESH_EXPIRED_RETRY_COOLDOWN_SECONDS
+        )
         last_attempt = attempts.get(alias)
-        if last_attempt is not None and now - last_attempt < AUTO_REFRESH_COOLDOWN_SECONDS:
+        if last_attempt is not None and now - last_attempt < cooldown:
             continue
         attempts[alias] = now
         try:
@@ -934,7 +959,8 @@ def _build_watch_hint_panel(manager: AuthManager, *, auto_refresh: bool = False)
         if auto_refresh:
             lines = [
                 "One or more CLI accounts have expired.",
-                "Auto-refresh is enabled and will keep trying the lightweight recovery path.",
+                "Auto-refresh is enabled and will keep retrying "
+                "the lightweight recovery path for expired accounts.",
                 "",
                 "Fallback:",
             ]
