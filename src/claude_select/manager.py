@@ -63,8 +63,8 @@ TOKEN_PROFILE_BETA_HEADER = "oauth-2025-04-20"
 class AuthManager:
     """Manage local Claude auth snapshots for CLI and SDK consumption."""
 
-    REFRESH_PRE_EXPIRY_WINDOW_SECONDS = 5
-    REFRESH_POST_EXPIRY_WINDOW_SECONDS = 10
+    RUNTIME_REFRESH_WINDOW_SECONDS = 5 * 60
+    BACKGROUND_REFRESH_WINDOW_SECONDS = 30 * 60
     OAUTH_TOKEN_REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
 
     def __init__(
@@ -130,7 +130,7 @@ class AuthManager:
         """Return one account and snapshot."""
         normalized = self._normalize_alias(alias)
         if auto_refresh:
-            return self._maybe_auto_refresh_alias(normalized)
+            return self.refresh_if_needed(normalized, context="runtime")
         return self.registry.get_account(normalized)
 
     def list_cli_accounts(
@@ -416,13 +416,8 @@ class AuthManager:
     ) -> dict[str, Any]:
         """Write a stored auth snapshot back into Claude's live auth backend."""
         normalized = self._normalize_alias(alias)
-        details = self.registry.get_account(normalized)
-        if (
-            auto_refresh
-            and details.record.auth_kind == AUTH_KIND_CLI_SNAPSHOT
-            and details.record.status() == STATUS_EXPIRED
-        ):
-            self.refresh_account(normalized)
+        if auto_refresh:
+            self.refresh_if_needed(normalized, context="runtime")
         return self._activate_cli_account(normalized, allow_expired=True)
 
     def refresh_account(
@@ -439,13 +434,10 @@ class AuthManager:
 
         normalized = self._normalize_alias(alias)
         details = self.registry.get_account(normalized)
-        if (
-            details.record.status() != STATUS_EXPIRED
-            and not self._is_within_refresh_probe_window(details.record)
-        ):
+        if not self._should_refresh_record(details.record, context="background"):
             raise AccountSelectionError(
                 f"Account '{normalized}' is not ready for refresh yet. "
-                "Try again within 5 seconds of expiry or after it expires."
+                "Try again when it is within the background refresh window or after it expires."
             )
         original_snapshot = self.auth_backend.read_snapshot()
         original_current_alias = self.current_alias()
@@ -534,16 +526,12 @@ class AuthManager:
 
     def auto_refresh_candidates(self) -> list[str]:
         """Return CLI aliases that should be auto-refreshed in watch mode."""
-        now = utc_now()
         rows = self.list_accounts(include_usage=False)
         return [
             str(row["alias"])
             for row in rows
             if row["auth_kind"] == AUTH_KIND_CLI_SNAPSHOT
-            and (
-                row["status"] == STATUS_EXPIRED
-                or self._is_expires_at_within_refresh_probe_window(row.get("expires_at"), now=now)
-            )
+            and self._should_refresh_expires_at(row.get("expires_at"), context="background")
         ]
 
     def _activate_cli_account(
@@ -577,7 +565,7 @@ class AuthManager:
         """Return an env mapping for Claude Agent SDK usage.
 
         Captured auth is treated as a fixed snapshot. With ``auto_refresh=True``,
-        expired CLI snapshots are refreshed on demand before the SDK env is
+        CLI snapshots are refreshed on demand before the SDK env is
         built. With ``probe_availability=True``, one minimal Claude request is
         attempted to verify that the prepared env is actually usable.
         """
@@ -779,12 +767,19 @@ class AuthManager:
         probe_availability: bool = False,
     ) -> list[dict[str, Any]]:
         """Return accounts that are currently usable, optionally requiring quota visibility."""
+        include_usage = include_usage or require_quota
         rows = self.list_accounts(
-            include_usage=include_usage or require_quota,
-            auto_refresh=auto_refresh,
+            include_usage=include_usage,
+            auto_refresh=False,
         )
         available: list[dict[str, Any]] = []
         for row in rows:
+            if auto_refresh and row["auth_kind"] == AUTH_KIND_CLI_SNAPSHOT:
+                try:
+                    self.refresh_if_needed(str(row["alias"]), context="runtime")
+                except ClaudeSelectError:
+                    continue
+                row = self._account_row(str(row["alias"]), include_usage=include_usage)
             if row["status"] == STATUS_EXPIRED:
                 continue
             if require_quota:
@@ -1293,17 +1288,27 @@ class AuthManager:
             usage_stale_after_seconds=usage_stale_after_seconds,
         )
 
-    def _maybe_auto_refresh_alias(self, alias: str) -> AccountDetails:
-        """Refresh one CLI alias on demand when it is expired."""
-        details = self.registry.get_account(alias)
+    def refresh_if_needed(
+        self,
+        alias: str,
+        *,
+        context: str = "runtime",
+    ) -> AccountDetails:
+        """Refresh one CLI alias when it falls inside the chosen refresh window."""
+        normalized = self._normalize_alias(alias)
+        details = self.registry.get_account(normalized)
         if details.record.auth_kind != AUTH_KIND_CLI_SNAPSHOT:
             return details
         if details.sdk_token_snapshot is not None:
             return details
-        if details.record.status() != STATUS_EXPIRED:
+        if not self._should_refresh_record(details.record, context=context):
             return details
-        self.refresh_account(alias)
-        return self.registry.get_account(alias)
+        self.refresh_account(normalized)
+        return self.registry.get_account(normalized)
+
+    def _maybe_auto_refresh_alias(self, alias: str) -> AccountDetails:
+        """Backward-compatible wrapper for runtime auto-refresh."""
+        return self.refresh_if_needed(alias, context="runtime")
 
     def _probe_sdk_alias_availability(
         self,
@@ -1356,9 +1361,9 @@ class AuthManager:
 
     def _best_effort_auto_refresh_candidates(self) -> None:
         """Best-effort refresh for list-style APIs that opt into auto-refresh."""
-        for alias in self.refresh_candidates():
+        for alias in self.auto_refresh_candidates():
             try:
-                self.refresh_account(alias)
+                self.refresh_if_needed(alias, context="background")
             except ClaudeSelectError:
                 continue
 
@@ -1370,7 +1375,7 @@ class AuthManager:
         return int(expires_at / 1000 - current.timestamp())
 
     def _is_within_refresh_probe_window(self, record: AccountRecord) -> bool:
-        return self._is_expires_at_within_refresh_probe_window(record.expires_at)
+        return self._should_refresh_record(record, context="runtime")
 
     def _is_expires_at_within_refresh_probe_window(
         self,
@@ -1378,14 +1383,67 @@ class AuthManager:
         *,
         now: Any | None = None,
     ) -> bool:
+        return self._should_refresh_expires_at(expires_at, context="runtime", now=now)
+
+    def _should_refresh_record(
+        self,
+        record: AccountRecord,
+        *,
+        context: str,
+        now: Any | None = None,
+    ) -> bool:
+        return self._should_refresh_expires_at(record.expires_at, context=context, now=now)
+
+    def _should_refresh_expires_at(
+        self,
+        expires_at: int | None,
+        *,
+        context: str,
+        now: Any | None = None,
+    ) -> bool:
         remaining = self._seconds_until_expiry(expires_at, now=now)
         if remaining is None:
             return False
-        return (
-            -self.REFRESH_POST_EXPIRY_WINDOW_SECONDS
-            <= remaining
-            <= self.REFRESH_PRE_EXPIRY_WINDOW_SECONDS
-        )
+        if remaining <= 0:
+            return True
+        return remaining <= self._refresh_window_seconds(context)
+
+    def _refresh_window_seconds(self, context: str) -> int:
+        normalized = context.strip().lower()
+        if normalized == "runtime":
+            return self.RUNTIME_REFRESH_WINDOW_SECONDS
+        if normalized == "background":
+            return self.BACKGROUND_REFRESH_WINDOW_SECONDS
+        raise AccountSelectionError(f"Unknown refresh context: {context}")
+
+    def _account_row(
+        self,
+        alias: str,
+        *,
+        include_usage: bool,
+    ) -> dict[str, Any]:
+        details = self.registry.get_account(alias)
+        payload = self._record_payload(details.record)
+        if include_usage:
+            quota = self.get_account_quota(alias, auto_refresh=False)
+            payload.update(
+                {
+                    "usage": quota["usage"],
+                    "available": quota["available"],
+                    "stale": quota["stale"],
+                    "error": quota["error"],
+                    "fetched_at": quota["fetched_at"],
+                    "five_hour": quota["five_hour"],
+                    "seven_day": quota["seven_day"],
+                    "seven_day_opus": quota["seven_day_opus"],
+                    "extra_usage": quota["extra_usage"],
+                    "quota_5h_left": quota["quota_5h_left"],
+                    "quota_5h_reset": quota["quota_5h_reset"],
+                    "quota_7d_left": quota["quota_7d_left"],
+                    "quota_7d_reset": quota["quota_7d_reset"],
+                }
+            )
+        return payload
 
     @staticmethod
     def _row_has_remaining_quota(row: dict[str, Any]) -> bool:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-select"
-version = "0.4.13"
+version = "0.4.14"
 description = "Manage a local registry of Claude CLI auth snapshots plus simple SDK token entries."
 readme = "README.md"
 requires-python = ">=3.12"

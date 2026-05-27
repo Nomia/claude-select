@@ -1288,15 +1288,17 @@ def test_list_account_quotas_auto_refresh_calls_best_effort(
     calls: list[str] = []
     monkeypatch.setattr(
         manager,
-        "refresh_account",
-        lambda alias, prompt="ping": calls.append(alias) or {"alias": alias},
+        "refresh_if_needed",
+        lambda alias, *, context="runtime": (
+            calls.append(f"{alias}:{context}") or manager.get_account(alias)
+        ),
     )
-    monkeypatch.setattr(manager, "refresh_candidates", lambda: ["work"])
+    monkeypatch.setattr(manager, "auto_refresh_candidates", lambda: ["work"])
 
     rows = manager.list_account_quotas(auto_refresh=True)
 
     assert rows[0]["alias"] == "work"
-    assert calls == ["work"]
+    assert calls == ["work:background"]
 
 
 def test_list_available_accounts_and_pick_available_account(registry, fake_auth_backend):
@@ -1652,6 +1654,67 @@ def test_build_sdk_env_auto_refresh_refreshes_expired_cli_alias(
     assert selected["status"] == "healthy"
 
 
+def test_build_sdk_env_auto_refresh_refreshes_cli_alias_within_runtime_window(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    details = manager.get_account("work")
+    now_ms = int(utc_now().timestamp() * 1000)
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=details.record.auth_kind,
+        email=details.record.email,
+        organization_name=details.record.organization_name,
+        organization_id=details.record.organization_id,
+        account_uuid=details.record.account_uuid,
+        captured_at=details.record.captured_at,
+        expires_at=now_ms + 4 * 60 * 1000,
+        last_selected_at=details.record.last_selected_at,
+        source=details.record.source,
+        snapshot=details.snapshot,
+        last_synced_at=details.record.last_synced_at,
+    )
+    refreshed_snapshot = AuthSnapshot(
+        oauth_account=details.snapshot.oauth_account,
+        credentials={
+            "claudeAiOauth": {
+                "accessToken": "access-2",
+                "refreshToken": "refresh-2",
+                "expiresAt": 4102448400000,
+                "scopes": ["user:profile"],
+            }
+        },
+    )
+
+    def fake_refresh(alias: str, *, prompt: str = "ping"):
+        manager.registry.upsert_account(
+            alias=alias,
+            auth_kind=AUTH_KIND_CLI_SNAPSHOT,
+            email=details.record.email,
+            organization_name=details.record.organization_name,
+            organization_id=details.record.organization_id,
+            account_uuid=details.record.account_uuid,
+            captured_at=details.record.captured_at,
+            expires_at=4102448400000,
+            last_selected_at=details.record.last_selected_at,
+            source=details.record.source,
+            snapshot=refreshed_snapshot,
+            last_synced_at=details.record.last_synced_at,
+        )
+        return {"alias": alias, "probe_prompt": prompt, "probe_output": "pong"}
+
+    monkeypatch.setattr(manager, "refresh_account", fake_refresh)
+
+    env = manager.build_sdk_env("work", auto_refresh=True)
+
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "access-2"
+
+
 def test_build_sdk_env_probe_availability_raises_on_failed_probe(
     registry, fake_auth_backend, fake_usage_provider, monkeypatch
 ):
@@ -1669,6 +1732,58 @@ def test_build_sdk_env_probe_availability_raises_on_failed_probe(
 
     with pytest.raises(AccountSelectionError, match="failed runtime probe: 403 forbidden"):
         manager.build_sdk_env("work", probe_availability=True)
+
+
+def test_list_available_accounts_auto_refresh_skips_failed_runtime_refresh(
+    registry, fake_auth_backend, monkeypatch
+):
+    usage_provider = AliasUsageProvider(
+        {
+            "alias:work": {"five_hour": 30.0, "seven_day": 40.0},
+            "alias:backup": {"five_hour": 20.0, "seven_day": 30.0},
+        }
+    )
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=usage_provider,
+    )
+    manager.capture_current_account("work")
+    work_details = manager.get_account("work")
+    now_ms = int(utc_now().timestamp() * 1000)
+    manager.registry.upsert_account(
+        alias="work",
+        auth_kind=work_details.record.auth_kind,
+        email=work_details.record.email,
+        organization_name=work_details.record.organization_name,
+        organization_id=work_details.record.organization_id,
+        account_uuid=work_details.record.account_uuid,
+        captured_at=work_details.record.captured_at,
+        expires_at=now_ms + 4 * 60 * 1000,
+        last_selected_at=work_details.record.last_selected_at,
+        source=work_details.record.source,
+        snapshot=work_details.snapshot,
+        last_synced_at=work_details.record.last_synced_at,
+    )
+
+    fake_auth_backend.snapshot.oauth_account["emailAddress"] = "backup@example.com"
+    fake_auth_backend.snapshot.oauth_account["organizationUuid"] = "org-456"
+    fake_auth_backend.snapshot.oauth_account["organizationName"] = "Backup Org"
+    fake_auth_backend.snapshot.oauth_account["accountUuid"] = "acct-456"
+    manager.capture_current_account("backup")
+
+    original_refresh_if_needed = manager.refresh_if_needed
+
+    def fake_refresh_if_needed(alias: str, *, context: str = "runtime"):
+        if alias == "work" and context == "runtime":
+            raise ConfigError("refresh failed")
+        return original_refresh_if_needed(alias, context=context)
+
+    monkeypatch.setattr(manager, "refresh_if_needed", fake_refresh_if_needed)
+
+    rows = manager.list_available_accounts(include_usage=True, auto_refresh=True)
+
+    assert [row["alias"] for row in rows] == ["backup"]
 
 
 def test_top_level_build_sdk_env_supports_auto_refresh(

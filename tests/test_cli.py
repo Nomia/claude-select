@@ -789,7 +789,7 @@ def test_watch_auto_refresh_expired_accounts_retry_on_longer_cooldown(
 
     fake_auth_backend.print_prompts.clear()
     attempts = {"work": 1000.0}
-    message = cli._maybe_auto_refresh_accounts(manager, attempts, 1030.0)
+    message = cli._maybe_auto_refresh_accounts(manager, attempts, 1059.0)
     assert message is None
     assert fake_auth_backend.print_prompts == []
 
@@ -934,27 +934,21 @@ def test_watch_hint_panel_for_expiring_account_with_auto_refresh(
     hint = cli._build_watch_hint_panel(manager, auto_refresh=True)
 
     assert hint is not None
-    assert "right around expiry" in str(hint.renderable)
+    assert "before expiry" in str(hint.renderable)
 
 
-def test_watch_sleep_seconds_uses_fast_poll_near_expiry():
-    now = 1_700_000_000
+def test_watch_sleep_seconds_stays_on_requested_interval():
     rows = [
         {
             "alias": "work",
             "auth_kind": "cli_snapshot",
             "kind_label": "cli",
-            "expires_at": int((now + 30) * 1000),
+            "expires_at": 1_700_000_030_000,
         }
     ]
 
-    original = cli.time.time
-    cli.time.time = lambda: now
-    try:
-        assert cli._watch_sleep_seconds(rows, interval=30, auto_refresh=True) == 1
-        assert cli._watch_sleep_seconds(rows, interval=30, auto_refresh=False) == 30
-    finally:
-        cli.time.time = original
+    assert cli._watch_sleep_seconds(rows, interval=30, auto_refresh=True) == 30
+    assert cli._watch_sleep_seconds(rows, interval=30, auto_refresh=False) == 30
 
 
 def test_cli_sync_current(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
