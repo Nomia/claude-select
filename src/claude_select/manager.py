@@ -434,11 +434,6 @@ class AuthManager:
 
         normalized = self._normalize_alias(alias)
         details = self.registry.get_account(normalized)
-        if not self._should_refresh_record(details.record, context="background"):
-            raise AccountSelectionError(
-                f"Account '{normalized}' is not ready for refresh yet. "
-                "Try again when it is within the background refresh window or after it expires."
-            )
         original_snapshot = self.auth_backend.read_snapshot()
         original_current_alias = self.current_alias()
         should_restore = self._snapshot_changed(original_snapshot, details.snapshot)

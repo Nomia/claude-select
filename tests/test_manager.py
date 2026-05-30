@@ -1893,7 +1893,7 @@ def test_refresh_account_raises_when_print_probe_fails(
         manager.refresh_account("work")
 
 
-def test_refresh_account_rejects_expiring_account_outside_probe_window(
+def test_refresh_account_allows_manual_refresh_for_healthy_account(
     registry, fake_auth_backend, fake_usage_provider
 ):
     manager = AuthManager(
@@ -1903,5 +1903,7 @@ def test_refresh_account_rejects_expiring_account_outside_probe_window(
     )
     manager.capture_current_account("work")
 
-    with pytest.raises(AccountSelectionError):
-        manager.refresh_account("work")
+    payload = manager.refresh_account("work")
+
+    assert payload["alias"] == "work"
+    assert payload["probe_output"] == "pong"
