@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import time
@@ -213,6 +214,38 @@ def test_refresh_snapshot_via_oauth_raises_helpful_error_for_http_failure(
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     with pytest.raises(ConfigError, match="refresh failed"):
+        manager._refresh_snapshot_via_oauth(snapshot)
+
+
+def test_refresh_snapshot_via_oauth_wraps_remote_disconnect(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    snapshot = AuthSnapshot(
+        oauth_account={"emailAddress": "work@example.com"},
+        credentials={
+            "claudeAiOauth": {
+                "accessToken": "access-1",
+                "refreshToken": "refresh-1",
+                "expiresAt": 0,
+                "clientId": "client-123",
+            }
+        },
+    )
+
+    def fake_urlopen(*_args, **_kwargs):
+        raise http.client.RemoteDisconnected("Remote end closed connection without response")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(
+        ConfigError,
+        match="OAuth token refresh failed: Remote end closed connection without response",
+    ):
         manager._refresh_snapshot_via_oauth(snapshot)
 
 

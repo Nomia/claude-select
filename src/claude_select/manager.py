@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -1236,7 +1237,12 @@ class AuthManager:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raise ConfigError(self._extract_http_error_reason(exc)) from exc
-        except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        except (
+            urllib.error.URLError,
+            json.JSONDecodeError,
+            http.client.HTTPException,
+            OSError,
+        ) as exc:
             raise ConfigError(f"OAuth token refresh failed: {exc}") from exc
 
         access_token = str(payload.get("access_token", "") or "").strip()
