@@ -221,6 +221,18 @@ def test_auth_backend_run_auth_login(monkeypatch):
     assert seen_client_ids == ["test-client-id"]
 
 
+def test_auth_backend_run_auth_login_returns_false_when_claude_is_not_executable(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
+    monkeypatch.setattr(
+        "subprocess.Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("Exec format error")),
+    )
+
+    backend = ClaudeAuthBackend()
+
+    assert backend.run_auth_login() is False
+
+
 def test_auth_backend_read_auth_status(monkeypatch):
     class Result:
         stdout = json.dumps({"loggedIn": True, "authMethod": "claude.ai"})
@@ -238,6 +250,18 @@ def test_auth_backend_read_auth_status(monkeypatch):
 
 def test_auth_backend_read_auth_status_falls_back(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    backend = ClaudeAuthBackend()
+
+    assert backend.read_auth_status() is None
+
+
+def test_auth_backend_read_auth_status_falls_back_when_claude_is_not_executable(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("Exec format error")),
+    )
 
     backend = ClaudeAuthBackend()
 
@@ -276,3 +300,20 @@ def test_auth_backend_run_print_prompt_failure(monkeypatch):
 
     assert ok is False
     assert output == "boom"
+
+
+def test_auth_backend_run_print_prompt_reports_exec_error(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("Exec format error")),
+    )
+
+    backend = ClaudeAuthBackend()
+
+    ok, output = backend.run_print_prompt("ping")
+
+    assert ok is False
+    assert output == (
+        "`claude` could not be executed from /usr/local/bin/claude: Exec format error"
+    )

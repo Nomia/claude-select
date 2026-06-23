@@ -205,13 +205,16 @@ class ClaudeAuthBackend:
         if not claude_path:
             return False
         self._pending_auth_login_client_id = None
-        process = subprocess.Popen(
-            [claude_path, "auth", "login"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
+        try:
+            process = subprocess.Popen(
+                [claude_path, "auth", "login"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except OSError:
+            return False
         captured_lines: list[str] = []
         assert process.stdout is not None
         for line in process.stdout:
@@ -232,12 +235,15 @@ class ClaudeAuthBackend:
         claude_path = shutil.which("claude")
         if not claude_path:
             return False, "`claude` was not found in PATH."
-        result = subprocess.run(
-            [claude_path, "-p", prompt],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [claude_path, "-p", prompt],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            return False, self._format_claude_exec_error(claude_path, exc)
         output = (result.stdout or result.stderr or "").strip()
         if result.returncode != 0:
             if not output:
@@ -257,7 +263,7 @@ class ClaudeAuthBackend:
                 capture_output=True,
                 text=True,
             )
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, OSError):
             return None
         try:
             payload = json.loads(result.stdout)
@@ -286,3 +292,8 @@ class ClaudeAuthBackend:
                 if client_id:
                     return client_id
         return None
+
+    @staticmethod
+    def _format_claude_exec_error(claude_path: str, exc: OSError) -> str:
+        """Return a readable error when the resolved Claude CLI cannot be executed."""
+        return f"`claude` could not be executed from {claude_path}: {exc}"
