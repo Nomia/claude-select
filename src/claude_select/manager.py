@@ -346,11 +346,17 @@ class AuthManager:
                 f"Account '{normalized}' is a token entry and cannot be relogged from Claude CLI."
             )
         snapshot = self.auth_backend.read_snapshot()
+        self._validate_login_snapshot(snapshot, previous=details.snapshot)
         record = self._upsert_snapshot(normalized, snapshot)
         return self._record_payload(record)
 
     def sync_current_account(self) -> dict[str, Any]:
         """Sync Claude's current live auth state back into the matching registry entry."""
+        with self.auth_backend.live_state_lock():
+            return self._sync_current_account_unlocked()
+
+    def _sync_current_account_unlocked(self) -> dict[str, Any]:
+        """Sync the live snapshot while the caller owns the live-state lock."""
         snapshot = self.auth_backend.read_snapshot()
         matches = self._matching_aliases(snapshot)
         if not matches:
@@ -419,7 +425,8 @@ class AuthManager:
         normalized = self._normalize_alias(alias)
         if auto_refresh:
             self.refresh_if_needed(normalized, context="runtime")
-        return self._activate_cli_account(normalized, allow_expired=True)
+        with self.auth_backend.live_state_lock():
+            return self._activate_cli_account(normalized, allow_expired=True)
 
     def refresh_account(
         self,
@@ -429,6 +436,21 @@ class AuthManager:
         progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Try to refresh one CLI account via direct OAuth refresh or a Claude probe."""
+        with self.auth_backend.live_state_lock():
+            return self._refresh_account_unlocked(
+                alias,
+                prompt=prompt,
+                progress_callback=progress_callback,
+            )
+
+    def _refresh_account_unlocked(
+        self,
+        alias: str,
+        *,
+        prompt: str,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None,
+    ) -> dict[str, Any]:
+        """Refresh one account while the caller owns the live-state lock."""
         def emit(stage: str, **payload: Any) -> None:
             if progress_callback is not None:
                 progress_callback(stage, payload)
@@ -482,7 +504,7 @@ class AuthManager:
                     raise ConfigError(f"Claude refresh probe failed: {output}")
                 emit("probe_succeeded", alias=account["alias"], prompt=prompt, output=output)
             emit("syncing_current", alias=account["alias"])
-            sync_payload = self.sync_current_account()
+            sync_payload = self._sync_current_account_unlocked()
             emit("sync_succeeded", alias=account["alias"], message=sync_payload["message"])
             refreshed = self.registry.get_account(account["alias"]).record
             return {
@@ -890,15 +912,42 @@ class AuthManager:
     def wait_for_login(self, launch: bool) -> None:
         """Guide the user through logging in with the Claude CLI."""
         if launch:
+            try:
+                previous = self.auth_backend.read_snapshot()
+            except ClaudeSelectError:
+                previous = None
+            print("Launching `claude auth login` in this terminal.")
             if self.auth_backend.run_auth_login():
-                print("Launching `claude auth login` in this terminal.")
-                print("Complete account authorization, then return here.")
-            else:
-                print("`claude` was not found in PATH.")
-                print("Run `claude auth login`, complete authorization, then return here.")
+                snapshot = self.auth_backend.read_snapshot()
+                self._validate_login_snapshot(snapshot, previous=previous)
+                return
+            print("`claude` was not found in PATH.")
+            print("Run `claude auth login`, complete authorization, then return here.")
         else:
             print("Run `claude auth login` in another shell, then return here.")
         input("Press Enter after login is complete...")
+        self._validate_login_snapshot(self.auth_backend.read_snapshot())
+
+    @staticmethod
+    def _validate_login_snapshot(
+        snapshot: AuthSnapshot,
+        *,
+        previous: AuthSnapshot | None = None,
+    ) -> None:
+        """Reject login results that are expired or did not replace the credentials."""
+        expires_at = snapshot.expires_at()
+        if expires_at is None:
+            raise ConfigError("Claude login did not return a credential expiry time.")
+        if AuthManager._status_from_expires_at(expires_at) == STATUS_EXPIRED:
+            raise AuthExpiredError(
+                "Claude login completed, but the stored credentials are still expired. "
+                "Stop any running `claude-select watch` process and try again."
+            )
+        if previous is not None and previous.credentials == snapshot.credentials:
+            raise ConfigError(
+                "Claude login completed, but the stored credentials did not change. "
+                "Stop any running `claude-select watch` process and try again."
+            )
 
     def choose_alias_interactively(self) -> str:
         """Prompt the user to choose one of the stored aliases."""

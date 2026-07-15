@@ -146,6 +146,7 @@ def test_cli_add_relogin_remove_current_plain(
     assert cli.main(["add", "work"]) == 0
     assert cli.main(["select", "work"]) == 0
     assert cli.main(["current"]) == 0
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["accessToken"] = "access-2"
     assert cli.main(["relogin", "work"]) == 0
     assert cli.main(["remove", "work"]) == 0
 
@@ -1240,6 +1241,14 @@ def test_wait_for_login_and_choose_alias_edge_cases(
     with pytest.raises(ClaudeSelectError):
         manager.choose_alias_interactively()
 
+    original_run_auth_login = fake_auth_backend.run_auth_login
+
+    def run_auth_login_with_new_credentials():
+        result = original_run_auth_login()
+        fake_auth_backend.snapshot.credentials["claudeAiOauth"]["accessToken"] = "access-2"
+        return result
+
+    monkeypatch.setattr(fake_auth_backend, "run_auth_login", run_auth_login_with_new_credentials)
     monkeypatch.setattr("builtins.input", lambda _prompt="": "")
     manager.wait_for_login(True)
     manager.wait_for_login(False)

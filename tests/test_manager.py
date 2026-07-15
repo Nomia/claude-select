@@ -1034,13 +1034,45 @@ def test_relogin_and_export_sdk_auth(registry, fake_auth_backend, fake_usage_pro
     )
     manager.capture_current_account("work")
     fake_auth_backend.snapshot.oauth_account["emailAddress"] = "next@example.com"
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["accessToken"] = "access-2"
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["expiresAt"] = 4102448400000
 
     updated = manager.relogin_account("work")
     exported = manager.export_sdk_auth("work")
 
     assert updated["email"] == "next@example.com"
     assert exported["email"] == "next@example.com"
-    assert exported["credentials"]["claudeAiOauth"]["accessToken"] == "access-1"
+    assert exported["credentials"]["claudeAiOauth"]["accessToken"] == "access-2"
+
+
+def test_relogin_rejects_unchanged_credentials(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+
+    with pytest.raises(ConfigError, match="credentials did not change"):
+        manager.relogin_account("work")
+
+
+def test_relogin_rejects_expired_credentials(
+    registry, fake_auth_backend, fake_usage_provider
+):
+    manager = AuthManager(
+        registry=registry,
+        auth_backend=fake_auth_backend,
+        usage_provider=fake_usage_provider,
+    )
+    manager.capture_current_account("work")
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["accessToken"] = "expired"
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["expiresAt"] = 1
+
+    with pytest.raises(AuthExpiredError, match="still expired"):
+        manager.relogin_account("work")
 
 
 def test_relogin_token_account_rejected(registry, fake_auth_backend, fake_usage_provider):

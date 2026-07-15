@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 
 import pytest
 
@@ -65,6 +66,9 @@ class FakeAuthBackend(ClaudeAuthBackend):
             "config: /fake/.claude.json",
             "credentials store: fake-test-backend",
         ]
+
+    def live_state_lock(self):
+        return nullcontext()
 
     def run_auth_login(self) -> bool:
         self.login_attempts += 1

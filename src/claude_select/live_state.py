@@ -16,6 +16,7 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
 
 from claude_select.exceptions import ConfigError
+from claude_select.locking import FileLock
 from claude_select.models import AuthSnapshot
 from claude_select.paths import get_credentials_path, get_global_config_path
 
@@ -80,7 +81,15 @@ class MacOSKeychainCredentialStore:
     def read(self) -> dict[str, Any]:
         try:
             result = subprocess.run(
-                ["security", "find-generic-password", "-s", self.service_name, "-w"],
+                [
+                    "security",
+                    "find-generic-password",
+                    "-a",
+                    self.account_name,
+                    "-w",
+                    "-s",
+                    self.service_name,
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -141,6 +150,10 @@ class ClaudeAuthBackend:
         self.credential_store = credential_store or create_default_credential_store(env)
         self.backup_dir = backup_dir or (self.config_path.parent / ".claude-select-backups")
         self._pending_auth_login_client_id: str | None = None
+
+    def live_state_lock(self) -> FileLock:
+        """Return the cross-process lock protecting Claude's live auth state."""
+        return FileLock(self.backup_dir / "live-state.lock")
 
     def read_snapshot(self) -> AuthSnapshot:
         """Read the current Claude live auth snapshot."""
@@ -213,15 +226,17 @@ class ClaudeAuthBackend:
                 text=True,
                 bufsize=1,
             )
-        except OSError:
-            return False
+        except OSError as exc:
+            raise ConfigError(self._format_claude_exec_error(claude_path, exc)) from exc
         captured_lines: list[str] = []
         assert process.stdout is not None
         for line in process.stdout:
             print(line, end="")
             captured_lines.append(line)
-        process.wait()
+        returncode = process.wait()
         self._pending_auth_login_client_id = self._extract_client_id_from_lines(captured_lines)
+        if returncode != 0:
+            raise ConfigError(f"`claude auth login` exited with status {returncode}.")
         return True
 
     def consume_auth_login_client_id(self) -> str | None:
@@ -282,7 +297,10 @@ class ClaudeAuthBackend:
     def _extract_client_id_from_lines(lines: Iterable[str]) -> str | None:
         """Extract OAuth client_id from one streamed `claude auth login` output."""
         for line in lines:
-            match = re.search(r"https://claude\.ai/oauth/authorize\S+", line)
+            match = re.search(
+                r"https://(?:claude\.ai/oauth|claude\.com/cai/oauth)/authorize\S+",
+                line,
+            )
             if not match:
                 continue
             parsed = urlparse(match.group(0))

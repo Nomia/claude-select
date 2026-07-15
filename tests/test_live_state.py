@@ -170,7 +170,15 @@ def test_macos_keychain_store(monkeypatch):
     assert store.read()["claudeAiOauth"]["accessToken"] == "token"
     store.write({"claudeAiOauth": {"accessToken": "next"}})
 
-    assert calls[0][:2] == ["security", "find-generic-password"]
+    assert calls[0] == [
+        "security",
+        "find-generic-password",
+        "-a",
+        "tester",
+        "-w",
+        "-s",
+        "Claude Code-credentials",
+    ]
     assert calls[1][:2] == ["security", "add-generic-password"]
 
 
@@ -221,6 +229,28 @@ def test_auth_backend_run_auth_login(monkeypatch):
     assert seen_client_ids == ["test-client-id"]
 
 
+def test_auth_backend_run_auth_login_captures_current_claude_com_client_id(monkeypatch):
+    class FakeProcess:
+        stdout = iter(
+            [
+                "If the browser didn't open, visit: "
+                "https://claude.com/cai/oauth/authorize?code=true&client_id=current-client-id\n",
+                "Login successful.\n",
+            ]
+        )
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+
+    backend = ClaudeAuthBackend()
+
+    assert backend.run_auth_login() is True
+    assert backend.consume_auth_login_client_id() == "current-client-id"
+
+
 def test_auth_backend_run_auth_login_returns_false_when_claude_is_not_executable(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
     monkeypatch.setattr(
@@ -230,7 +260,24 @@ def test_auth_backend_run_auth_login_returns_false_when_claude_is_not_executable
 
     backend = ClaudeAuthBackend()
 
-    assert backend.run_auth_login() is False
+    with pytest.raises(ConfigError, match="could not be executed"):
+        backend.run_auth_login()
+
+
+def test_auth_backend_run_auth_login_rejects_failed_process(monkeypatch):
+    class FakeProcess:
+        stdout = iter(["OAuth error.\n"])
+
+        def wait(self):
+            return 1
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/claude")
+    monkeypatch.setattr("subprocess.Popen", lambda *_args, **_kwargs: FakeProcess())
+
+    backend = ClaudeAuthBackend()
+
+    with pytest.raises(ConfigError, match="exited with status 1"):
+        backend.run_auth_login()
 
 
 def test_auth_backend_read_auth_status(monkeypatch):

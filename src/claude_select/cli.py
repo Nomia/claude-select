@@ -352,9 +352,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_init(manager, launch=args.launch)
         if args.command == "add":
             alias = args.alias or input("Alias: ").strip()
-            manager.wait_for_login(args.launch)
-            _confirm_current_auth_status(manager, alias=alias, action="capture")
-            account = manager.capture_current_account(alias, overwrite=True)
+            with manager.auth_backend.live_state_lock():
+                manager.wait_for_login(args.launch)
+                _confirm_current_auth_status(manager, alias=alias, action="capture")
+                account = manager.capture_current_account(alias, overwrite=True)
             _print_capture_feedback(manager, account, verb="Captured")
             return 0
         if args.command == "add-token":
@@ -364,9 +365,10 @@ def main(argv: list[str] | None = None) -> int:
             _print_capture_feedback(manager, account, verb="Captured")
             return 0
         if args.command == "relogin":
-            manager.wait_for_login(args.launch)
-            _confirm_current_auth_status(manager, alias=args.alias, action="relogin")
-            account = manager.relogin_account(args.alias)
+            with manager.auth_backend.live_state_lock():
+                manager.wait_for_login(args.launch)
+                _confirm_current_auth_status(manager, alias=args.alias, action="relogin")
+                account = manager.relogin_account(args.alias)
             _print_capture_feedback(manager, account, verb="Updated")
             return 0
         if args.command in {"list", "ls"}:
@@ -483,9 +485,10 @@ def _run_init(manager: AuthManager, *, launch: bool) -> int:
         alias = input("Alias (blank to finish): ").strip()
         if not alias:
             break
-        manager.wait_for_login(launch)
-        _confirm_current_auth_status(manager, alias=alias, action="capture")
-        account = manager.capture_current_account(alias, overwrite=True)
+        with manager.auth_backend.live_state_lock():
+            manager.wait_for_login(launch)
+            _confirm_current_auth_status(manager, alias=alias, action="capture")
+            account = manager.capture_current_account(alias, overwrite=True)
         _print_capture_feedback(manager, account, verb="Captured")
         if input("Add another account? [Y/n] ").strip().lower() in {"n", "no"}:
             break
