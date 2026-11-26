@@ -54,9 +54,7 @@ def test_cli_select_and_current(
     assert "Selected work <work@example.com> [Example Org]." in output
     assert "Updated Claude live auth state:" in output
     assert "Current CLI alias: work" in output
-    payload = json.loads(
-        output.split("Current CLI alias: work\n", maxsplit=1)[1]
-    )
+    payload = json.loads(output.split("Current CLI alias: work\n", maxsplit=1)[1])
     assert payload["current_alias"] == "work"
 
 
@@ -154,9 +152,7 @@ def test_cli_add_relogin_remove_current_plain(
     assert "Captured work <work@example.com> [Example Org]." in output
 
 
-def test_cli_rename_account(
-    monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider
-):
+def test_cli_rename_account(monkeypatch, capsys, registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
         auth_backend=fake_auth_backend,
@@ -767,6 +763,7 @@ def test_watch_auto_refresh_expired_accounts_retry_on_longer_cooldown(
         auth_backend=fake_auth_backend,
         usage_provider=fake_usage_provider,
     )
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["expiresAt"] = 0
     manager.capture_current_account("work")
     details = manager.get_account("work")
     manager.registry.upsert_account(
@@ -784,19 +781,18 @@ def test_watch_auto_refresh_expired_accounts_retry_on_longer_cooldown(
         last_synced_at=details.record.last_synced_at,
     )
 
-    message = cli._maybe_auto_refresh_accounts(manager, {}, 1000.0)
-    assert message is not None
-    assert "Auto-refreshed work" in message
-
+    attempts = {}
+    history = {}
+    message = cli._maybe_auto_refresh_accounts(manager, attempts, 1000.0, history)
+    assert "still expired" in message
+    assert "CLI" in message
     fake_auth_backend.print_prompts.clear()
-    attempts = {"work": 1000.0}
-    message = cli._maybe_auto_refresh_accounts(manager, attempts, 1059.0)
-    assert message is None
+    assert cli._maybe_auto_refresh_accounts(manager, attempts, 1059.0, history) == message
     assert fake_auth_backend.print_prompts == []
 
     message = cli._maybe_auto_refresh_accounts(manager, attempts, 1061.0)
     assert message is not None
-    assert "Auto-refreshed work" in message
+    assert "still expired" in message
     assert fake_auth_backend.print_prompts == ["ping"]
 
 

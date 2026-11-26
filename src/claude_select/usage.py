@@ -77,8 +77,7 @@ class OAuthUsageProvider:
             )
             if stale is not None:
                 fetched_at = (
-                    self._epoch_from_iso(str(stale.get("fetched_at", "") or ""))
-                    or now_epoch
+                    self._epoch_from_iso(str(stale.get("fetched_at", "") or "")) or now_epoch
                 )
                 stale["stale"] = True
                 stale["cache_age_seconds"] = max(now_epoch - fetched_at, 0)

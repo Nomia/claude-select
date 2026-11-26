@@ -54,8 +54,7 @@ class AuthRegistry:
                     """
             )
             columns = {
-                row[1]
-                for row in connection.execute("PRAGMA table_info(accounts)").fetchall()
+                row[1] for row in connection.execute("PRAGMA table_info(accounts)").fetchall()
             }
             if "auth_kind" not in columns:
                 connection.execute(

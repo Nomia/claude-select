@@ -1045,9 +1045,7 @@ def test_relogin_and_export_sdk_auth(registry, fake_auth_backend, fake_usage_pro
     assert exported["credentials"]["claudeAiOauth"]["accessToken"] == "access-2"
 
 
-def test_relogin_rejects_unchanged_credentials(
-    registry, fake_auth_backend, fake_usage_provider
-):
+def test_relogin_rejects_unchanged_credentials(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
         auth_backend=fake_auth_backend,
@@ -1059,9 +1057,7 @@ def test_relogin_rejects_unchanged_credentials(
         manager.relogin_account("work")
 
 
-def test_relogin_rejects_expired_credentials(
-    registry, fake_auth_backend, fake_usage_provider
-):
+def test_relogin_rejects_expired_credentials(registry, fake_auth_backend, fake_usage_provider):
     manager = AuthManager(
         registry=registry,
         auth_backend=fake_auth_backend,
@@ -1972,3 +1968,46 @@ def test_refresh_account_allows_manual_refresh_for_healthy_account(
 
     assert payload["alias"] == "work"
     assert payload["probe_output"] == "pong"
+    assert not payload["extended"]
+
+
+@pytest.mark.parametrize("live_is_target", [False, True])
+def test_direct_refresh_updates_only_target_and_survives_sync(
+    registry, fake_auth_backend, fake_usage_provider, monkeypatch, live_is_target
+):
+    manager = AuthManager(
+        registry=registry, auth_backend=fake_auth_backend, usage_provider=fake_usage_provider
+    )
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["expiresAt"] = 1
+    fake_auth_backend._pending_auth_login_client_id = "public-client"
+    manager.capture_current_account("target")
+    manager.capture_current_account("duplicate")
+    if not live_is_target:
+        fake_auth_backend.snapshot.oauth_account["organizationUuid"] = "other"
+    original = fake_auth_backend.read_snapshot()
+
+    def renew(snapshot):
+        snapshot.credentials["claudeAiOauth"]["expiresAt"] = 4102444800000
+        return snapshot
+
+    monkeypatch.setattr(manager, "_refresh_snapshot_via_oauth", renew)
+    result = manager.refresh_account("target")
+    assert result["extended"]
+    if live_is_target:
+        assert fake_auth_backend.snapshot.expires_at() == 4102444800000
+    else:
+        assert fake_auth_backend.written_snapshot is None
+        assert original == fake_auth_backend.snapshot
+    manager.sync_current_account()
+    assert manager.get_account("target").record.expires_at == 4102444800000
+    assert manager.get_account("duplicate").record.expires_at == 1
+
+
+def test_sync_skips_older_live_expiry(registry, fake_auth_backend, fake_usage_provider):
+    manager = AuthManager(
+        registry=registry, auth_backend=fake_auth_backend, usage_provider=fake_usage_provider
+    )
+    manager.capture_current_account("work")
+    fake_auth_backend.snapshot.credentials["claudeAiOauth"]["expiresAt"] = 0
+    assert manager.sync_current_account()["status"] == "older_live_snapshot"
+    assert manager.get_account("work").record.status() == "healthy"

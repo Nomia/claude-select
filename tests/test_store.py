@@ -56,9 +56,7 @@ def test_registry_usage_cache(registry: AuthRegistry):
     assert registry.get_usage_cache("alias:work", max_age_seconds=10, now_epoch=120) is None
 
 
-def test_registry_rename_account_updates_related_metadata(
-    registry: AuthRegistry, sample_snapshot
-):
+def test_registry_rename_account_updates_related_metadata(registry: AuthRegistry, sample_snapshot):
     registry.upsert_account(
         alias="work",
         auth_kind="cli_snapshot",

@@ -48,4 +48,3 @@ def get_default_store_root(env: Mapping[str, str] | None = None) -> Path:
 def get_registry_db_path(env: Mapping[str, str] | None = None) -> Path:
     """Return the SQLite registry path."""
     return get_default_store_root(env) / "registry.db"
-

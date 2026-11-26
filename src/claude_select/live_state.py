@@ -207,9 +207,7 @@ class ClaudeAuthBackend:
                 f"({self.credential_store.service_name}/{self.credential_store.account_name})"
             )
         else:
-            targets.append(
-                f"credentials store: {self.credential_store.__class__.__name__}"
-            )
+            targets.append(f"credentials store: {self.credential_store.__class__.__name__}")
         return targets
 
     def run_auth_login(self) -> bool:

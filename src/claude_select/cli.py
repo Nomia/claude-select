@@ -142,9 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Use this when an account is expired or close to expiry."
         ),
         epilog=(
-            "Examples:\n"
-            "  claude-select relogin work\n"
-            "  claude-select relogin personal --no-launch"
+            "Examples:\n  claude-select relogin work\n  claude-select relogin personal --no-launch"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -383,8 +381,7 @@ def main(argv: list[str] | None = None) -> int:
                     for line in diagnostics_lines:
                         print(line)
                     print(
-                        "Tip: run `claude-select list --usage` again "
-                        "to retry the foreground fetch."
+                        "Tip: run `claude-select list --usage` again to retry the foreground fetch."
                     )
             else:
                 print(manager.render_table(include_usage=False))
@@ -552,10 +549,7 @@ def _run_refresh(manager: AuthManager, *, alias: str | None) -> int:
             if stage == "activating_target":
                 print("  [1/4] Activating target account in Claude live auth state...")
             elif stage == "target_activated":
-                print(
-                    f"         Active alias: {payload['alias']} "
-                    f"(status: {payload['status']})"
-                )
+                print(f"         Active alias: {payload['alias']} (status: {payload['status']})")
             elif stage == "running_probe":
                 print(
                     f"  [2/4] Running `claude -p {payload['prompt']!r}` "
@@ -598,12 +592,14 @@ def _run_refresh(manager: AuthManager, *, alias: str | None) -> int:
                     print("         No restore was needed.")
 
         payload = manager.refresh_account(target, progress_callback=on_progress)
-        if payload["refresh_method"] == "oauth_token":
+        if not payload["extended"]:
+            print(f"{target} is still valid; expiry did not extend.")
+        elif payload["refresh_method"] == "oauth_token":
             print(f"Refreshed {payload['alias']} via direct OAuth token refresh.")
         else:
             print(f"Refreshed {payload['alias']} via `claude -p`.")
-        if payload["probe_output"]:
-            print(f"Probe output: {payload['probe_output']}")
+        if payload["probe_output"] == "pong":
+            print("Probe output: pong")
         print()
     print("Current registry:")
     print(manager.render_table())
@@ -641,9 +637,11 @@ def _confirm_current_auth_status(manager: AuthManager, *, alias: str, action: st
     print(f"  email: {email}")
     print(f"  organization: {org_name}")
     print(f"  auth method: {auth_method}")
-    answer = input(
-        f"Use this identity for alias `{alias}` and continue with {action}? [Y/n] "
-    ).strip().lower()
+    answer = (
+        input(f"Use this identity for alias `{alias}` and continue with {action}? [Y/n] ")
+        .strip()
+        .lower()
+    )
     if answer in {"n", "no"}:
         raise ClaudeSelectError(
             "Capture cancelled. Re-run `claude auth login`, confirm "
@@ -765,6 +763,7 @@ def _run_watch(
     last_sync_monotonic = 0.0
     last_auto_refresh_message: str | None = None
     auto_refresh_attempts: dict[str, float] = {}
+    refresh_history: dict[str, str] = {}
     usage_refresh_state: dict[str, dict[str, Any]] = {}
     last_usage_refresh_message: str | None = None
     console = Console()
@@ -778,7 +777,7 @@ def _run_watch(
                         last_sync_monotonic = now
                     if auto_refresh:
                         last_auto_refresh_message = _maybe_auto_refresh_accounts(
-                            manager, auto_refresh_attempts, now
+                            manager, auto_refresh_attempts, now, refresh_history
                         )
                     rows = manager.list_accounts(
                         include_usage=include_usage,
@@ -920,21 +919,66 @@ def _maybe_auto_refresh_accounts(
     manager: AuthManager,
     attempts: dict[str, float],
     now: float,
+    history: dict[str, str] | None = None,
 ) -> str | None:
     """Best-effort auto-refresh for watch mode with per-alias cooldown."""
-    messages: list[str] = []
+    messages = {} if history is None else history
     for alias in manager.auto_refresh_candidates():
         last_attempt = attempts.get(alias)
         if last_attempt is not None and now - last_attempt < AUTO_REFRESH_COOLDOWN_SECONDS:
             continue
         attempts[alias] = now
+        stamp = time.strftime("%H:%M:%S")
+        path: list[str] = []
+        before = "unknown"
+
+        def progress(stage: str, data: dict[str, Any], route: list[str] = path) -> None:
+            nonlocal before
+            if stage == "start":
+                before = _expiry_label(data.get("previous_expires_at"))
+            elif stage == "running_direct_refresh":
+                route.append("OAuth")
+            elif stage == "running_probe":
+                route.append("CLI")
+
         try:
-            payload = manager.refresh_account(alias)
+            payload = manager.refresh_account(alias, progress_callback=progress)
         except ClaudeSelectError as exc:
-            messages.append(f"Auto-refresh failed for {alias}: {exc}")
+            messages[alias] = (
+                f"{stamp} {alias} ({' -> '.join(path) or 'prepare'}): {before}; "
+                f"refresh failed: {_watch_refresh_failure(exc)}"
+            )
             continue
-        messages.append(f"Auto-refreshed {alias}: {payload['sync']['message']}")
-    return "\n".join(messages) if messages else None
+        result = (
+            f"Auto-refreshed {alias}"
+            if payload["extended"]
+            else f"{alias}: still valid, no extension"
+        )
+        after = _expiry_label(payload["sync"]["current_expires_at"])
+        messages[alias] = f"{stamp} {result} ({' -> '.join(path)}): {before} -> {after}"
+    return "\n".join(messages.values()) or None
+
+
+def _expiry_label(value: int | None) -> str:
+    if value is None:
+        return "unknown"
+    if value == 0:
+        return "expired"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value / 1000))
+
+
+def _watch_refresh_failure(exc: ClaudeSelectError) -> str:
+    message = str(exc)
+    for reason in (
+        "still expired",
+        "identity changed",
+        "expiry did not match",
+        "readable live session",
+        "Timed out waiting for lock",
+    ):
+        if reason in message:
+            return reason
+    return AuthManager._safe_refresh_error(message)
 
 
 def _build_watch_hint_panel(manager: AuthManager, *, auto_refresh: bool = False) -> Panel | None:

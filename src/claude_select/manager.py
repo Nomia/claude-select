@@ -377,6 +377,20 @@ class AuthManager:
         alias = matches[0]
         details = self.registry.get_account(alias)
         before = details.snapshot
+        if (
+            (snapshot.expires_at() or 0)
+            <= utc_now().timestamp() * 1000
+            < (before.expires_at() or 0)
+        ):
+            return {
+                "status": "older_live_snapshot",
+                "matched_alias": alias,
+                "updated": False,
+                "record": self._record_payload(details.record),
+                "previous_expires_at": before.expires_at(),
+                "current_expires_at": snapshot.expires_at(),
+                "message": "Live expiry is older; kept the newer registry session.",
+            }
         changed = self._snapshot_changed(before, snapshot)
         if changed:
             record = self._sync_snapshot(alias, snapshot)
@@ -451,86 +465,147 @@ class AuthManager:
         progress_callback: Callable[[str, dict[str, Any]], None] | None,
     ) -> dict[str, Any]:
         """Refresh one account while the caller owns the live-state lock."""
+
         def emit(stage: str, **payload: Any) -> None:
             if progress_callback is not None:
                 progress_callback(stage, payload)
 
         normalized = self._normalize_alias(alias)
         details = self.registry.get_account(normalized)
-        original_snapshot = self.auth_backend.read_snapshot()
-        original_current_alias = self.current_alias()
-        should_restore = self._snapshot_changed(original_snapshot, details.snapshot)
-        emit(
-            "start",
-            alias=normalized,
-            original_current_alias=original_current_alias,
-            will_restore=should_restore,
-            prompt=prompt,
-        )
-        emit("activating_target", alias=normalized)
-        account = self._activate_cli_account(normalized, allow_expired=True, mark_selected=False)
-        emit("target_activated", alias=account["alias"], status=account["status"])
+        if details.record.auth_kind != AUTH_KIND_CLI_SNAPSHOT:
+            raise AccountKindError("Only CLI accounts can be refreshed.")
+        target = details.snapshot
+        before = details.record.expires_at
         try:
-            output = ""
-            refresh_method = "probe"
-            direct_refresh_reason = self._direct_refresh_unavailable_reason(details.snapshot)
-            if direct_refresh_reason is None:
-                emit("running_direct_refresh", alias=account["alias"])
-                try:
-                    refreshed_snapshot = self._refresh_snapshot_via_oauth(details.snapshot)
-                except ClaudeSelectError as exc:
-                    direct_refresh_reason = str(exc)
-                    emit(
-                        "direct_refresh_failed",
-                        alias=account["alias"],
-                        reason=direct_refresh_reason,
-                    )
-                else:
-                    self.auth_backend.write_snapshot(refreshed_snapshot)
-                    refresh_method = "oauth_token"
-                    output = "refreshed via OAuth token endpoint"
-                    emit("direct_refresh_succeeded", alias=account["alias"])
-            if refresh_method != "oauth_token":
-                if direct_refresh_reason is not None:
-                    emit(
-                        "falling_back_to_probe",
-                        alias=account["alias"],
-                        reason=direct_refresh_reason,
-                    )
-                emit("running_probe", alias=account["alias"], prompt=prompt)
+            original = self.auth_backend.read_snapshot()
+        except ConfigError:
+            original = None
+        current = original is not None and self._same_session(original, target)
+        emit("start", alias=normalized, previous_expires_at=before)
+        reason = self._direct_refresh_unavailable_reason(target)
+        method = "oauth_token"
+        output = "refreshed via OAuth token endpoint"
+        if reason is None:
+            emit("running_direct_refresh", alias=normalized)
+            try:
+                candidate = self._refresh_snapshot_via_oauth(target)
+            except ClaudeSelectError as exc:
+                reason = self._safe_refresh_error(str(exc))
+                emit("direct_refresh_failed", reason=reason)
+            else:
+                emit("direct_refresh_succeeded", alias=normalized)
+
+        swapped = False
+        original_alias = self.current_alias()
+        if reason is not None:
+            method = "probe"
+            if original is None:
+                raise ConfigError("CLI fallback requires a readable live session.")
+            emit("activating_target", alias=normalized)
+            if not current:
+                self.auth_backend.write_snapshot(target)
+                swapped = True
+            emit("target_activated", alias=normalized, status=details.record.status())
+            emit("falling_back_to_probe", reason=reason)
+        try:
+            if method == "probe":
+                emit("running_probe", alias=normalized, prompt=prompt)
                 ok, output = self.auth_backend.run_print_prompt(prompt)
                 if not ok:
-                    emit("probe_failed", alias=account["alias"], prompt=prompt, output=output)
-                    raise ConfigError(f"Claude refresh probe failed: {output}")
-                emit("probe_succeeded", alias=account["alias"], prompt=prompt, output=output)
-            emit("syncing_current", alias=account["alias"])
-            sync_payload = self._sync_current_account_unlocked()
-            emit("sync_succeeded", alias=account["alias"], message=sync_payload["message"])
-            refreshed = self.registry.get_account(account["alias"]).record
+                    failure = self._safe_refresh_error(output)
+                    emit("probe_failed", output=failure)
+                    raise ConfigError(f"OAuth: {reason}; CLI probe: {failure}")
+                emit("probe_succeeded", alias=normalized)
+                candidate = self.auth_backend.read_snapshot()
+                if self._identity(candidate) != self._identity(target):
+                    raise ConfigError("Live identity changed during CLI probe.")
+            after = candidate.expires_at()
+            if after is None or after <= utc_now().timestamp() * 1000:
+                raise ConfigError("Session is still expired after refresh.")
+            emit("syncing_current", alias=normalized)
+            changed = before != after or self._snapshot_changed(target, candidate)
+            if changed:
+                self._sync_snapshot(normalized, candidate)
+            refreshed = self.registry.get_account(normalized).record
+            if refreshed.expires_at != after:
+                raise ConfigError("Registry expiry did not match the refresh result.")
+            if (
+                method == "oauth_token"
+                and current
+                and original is not None
+                and self._same_session(self.auth_backend.read_snapshot(), original)
+            ):
+                self.auth_backend.write_snapshot(candidate)
+            extended = before is None or after > before
+            message = "Expiry extended." if extended else "Still valid; expiry did not extend."
+            emit("sync_succeeded", alias=normalized, message=message)
             return {
-                "alias": account["alias"],
-                "refresh_method": refresh_method,
+                "alias": normalized,
+                "refresh_method": method,
+                "extended": extended,
                 "probe_prompt": prompt,
                 "probe_output": output,
-                "sync": sync_payload,
+                "sync": {
+                    "status": "synced" if changed else "unchanged",
+                    "matched_alias": normalized,
+                    "updated": changed,
+                    "message": message,
+                    "record": self._record_payload(refreshed),
+                    "previous_expires_at": before,
+                    "current_expires_at": after,
+                },
                 "record": self._record_payload(refreshed),
             }
         finally:
-            emit(
-                "restoring_original",
-                alias=account["alias"],
-                original_current_alias=original_current_alias,
-                will_restore=should_restore,
-            )
-            if should_restore:
-                self.auth_backend.write_snapshot(original_snapshot)
-            self.registry.set_current_alias(original_current_alias)
-            emit(
-                "restore_complete",
-                alias=account["alias"],
-                original_current_alias=original_current_alias,
-                restored=should_restore,
-            )
+            if method == "probe":
+                emit(
+                    "restoring_original",
+                    original_current_alias=original_alias,
+                    will_restore=swapped,
+                )
+                restored = False
+                if (
+                    swapped
+                    and original is not None
+                    and self._identity(self.auth_backend.read_snapshot()) == self._identity(target)
+                ):
+                    self.auth_backend.write_snapshot(original)
+                    restored = True
+                emit("restore_complete", original_current_alias=original_alias, restored=restored)
+
+    @staticmethod
+    def _identity(snapshot: AuthSnapshot) -> tuple[Any, ...]:
+        return tuple(
+            snapshot.oauth_account.get(k)
+            for k in ("emailAddress", "accountUuid", "organizationUuid")
+        )
+
+    @classmethod
+    def _same_session(cls, left: AuthSnapshot, right: AuthSnapshot) -> bool:
+        access = left.credentials["claudeAiOauth"].get("accessToken")
+        return bool(
+            access
+            and cls._identity(left) == cls._identity(right)
+            and access == right.credentials["claudeAiOauth"].get("accessToken")
+        )
+
+    @staticmethod
+    def _safe_refresh_error(message: str) -> str:
+        code = re.search(r"\b(400|401|403|404|408|429|5\d\d)\b", message)
+        if code:
+            return f"HTTP {code[1]}"
+        for marker in (
+            "invalid_grant",
+            "timed out",
+            "not found in path",
+            "could not be executed",
+            "connection refused",
+            "connection reset",
+            "invalid authentication",
+        ):
+            if marker in message.lower():
+                return marker
+        return "request failed"
 
     def refresh_candidates(self) -> list[str]:
         """Return CLI aliases that are already expired."""
@@ -538,8 +613,7 @@ class AuthManager:
         return [
             str(row["alias"])
             for row in rows
-            if row["auth_kind"] == AUTH_KIND_CLI_SNAPSHOT
-            and row["status"] == STATUS_EXPIRED
+            if row["auth_kind"] == AUTH_KIND_CLI_SNAPSHOT and row["status"] == STATUS_EXPIRED
         ]
 
     def auto_refresh_candidates(self) -> list[str]:
@@ -848,8 +922,7 @@ class AuthManager:
                 return row
             failures.append(f"{row['alias']}: {reason}")
         raise AccountSelectionError(
-            "No available accounts passed runtime probe. Tried: "
-            + "; ".join(failures)
+            "No available accounts passed runtime probe. Tried: " + "; ".join(failures)
         )
 
     def render_table(self, include_usage: bool = False) -> str:
@@ -869,10 +942,7 @@ class AuthManager:
         ]
         if include_usage:
             headers.extend(["5h Left", "5h Reset", "7d Left", "7d Reset"])
-        body = [
-            self._table_row(row, include_usage=include_usage)
-            for row in rows
-        ]
+        body = [self._table_row(row, include_usage=include_usage) for row in rows]
         widths = [
             max(len(headers[index]), *(len(str(row[index])) for row in body))
             for index in range(len(headers))
@@ -992,9 +1062,7 @@ class AuthManager:
             account_uuid=str(oauth_account.get("accountUuid", "") or ""),
             captured_at=captured_at,
             expires_at=(
-                expires_at_override
-                if expires_at_override is not None
-                else snapshot.expires_at()
+                expires_at_override if expires_at_override is not None else snapshot.expires_at()
             ),
             last_selected_at=existing_last_selected,
             source="claude_cli" if auth_kind == AUTH_KIND_CLI_SNAPSHOT else "claude_setup_token",
@@ -1109,13 +1177,9 @@ class AuthManager:
             organization = {}
 
         metadata = {
-            "email": (
-                _string(raw.get("emailAddress"))
-                or _string(raw.get("email"))
-            ),
+            "email": (_string(raw.get("emailAddress")) or _string(raw.get("email"))),
             "organization_name": (
-                _string(raw.get("organizationName"))
-                or _string(organization.get("name"))
+                _string(raw.get("organizationName")) or _string(organization.get("name"))
             ),
             "organization_id": (
                 _string(raw.get("organizationUuid"))
@@ -1203,9 +1267,10 @@ class AuthManager:
 
     @staticmethod
     def _snapshot_changed(before: AuthSnapshot, after: AuthSnapshot) -> bool:
+        if before.client_id() and not after.client_id():
+            after = AuthManager._snapshot_with_client_id(after, before.client_id() or "")
         return (
-            before.oauth_account != after.oauth_account
-            or before.credentials != after.credentials
+            before.oauth_account != after.oauth_account or before.credentials != after.credentials
         )
 
     def _snapshot_with_persisted_client_id(
@@ -1552,10 +1617,9 @@ class AuthManager:
             return False
         five_hour = self._window_payload(usage, "five_hour")
         seven_day = self._window_payload(usage, "seven_day")
-        return (
-            not self._window_limit_reached(five_hour, self.SDK_FIVE_HOUR_LIMIT_PERCENT)
-            and not self._window_limit_reached(seven_day, self.SDK_SEVEN_DAY_LIMIT_PERCENT)
-        )
+        return not self._window_limit_reached(
+            five_hour, self.SDK_FIVE_HOUR_LIMIT_PERCENT
+        ) and not self._window_limit_reached(seven_day, self.SDK_SEVEN_DAY_LIMIT_PERCENT)
 
     def _sdk_candidate_sort_key(self, row: dict[str, Any]) -> tuple[float, float, str]:
         usage = row.get("usage")
